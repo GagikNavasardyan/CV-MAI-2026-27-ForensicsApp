@@ -5,6 +5,7 @@ from .convolution import ConvolutionTool
 from .edge_detection import EdgeDetectionTool
 from .grayscale import GrayscaleTool
 from .histogram import HistogramTool
+from .hog import HogTool
 from .image_filters import ImageFiltersTool
 from .image_info import ImageInfoTool
 from .masking import MaskingTool
@@ -30,6 +31,7 @@ def build_tool_registry() -> ToolRegistry:
             EdgeDetectionTool(),
             SharpeningTool(),
             TemplateMatchingTool(),
+            HogTool(),
         ]
     )
 

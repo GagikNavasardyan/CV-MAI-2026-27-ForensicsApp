@@ -16,6 +16,7 @@ from forensics_app.tools.convolution import (
 from forensics_app.tools.edge_detection import VIEWS, detect_edges, show_edges
 from forensics_app.tools.grayscale import GrayscaleTool
 from forensics_app.tools.histogram import histogram_image
+from forensics_app.tools.hog import VIEWS as HOG_VIEWS, extract_hog, show_hog
 from forensics_app.tools.registry import ToolRegistry
 from forensics_app.tools.split_channel import SplitChannelTool
 from forensics_app.tools.swap_channels import swap_channels
@@ -206,6 +207,34 @@ class ToolTests(unittest.TestCase):
         wide = np.asarray(show_edges(image, edges, "Contour overlay", thickness=1)).copy()
         wider = np.asarray(show_edges(image, edges, "Contour overlay", thickness=4))
         self.assertGreater(int((wider == (255, 0, 0)).all(axis=2).sum()), int((wide == (255, 0, 0)).all(axis=2).sum()))
+
+    def test_hog_descriptor_length_follows_cells_and_blocks(self) -> None:
+        image = Image.new("RGB", (48, 64), (100, 100, 100))
+        image.paste((255, 255, 255), (16, 16, 32, 48))
+        descriptor, hog_image = extract_hog(image, orientations=9, pixels_per_cell=(8, 8), cells_per_block=(2, 2))
+        self.assertEqual(descriptor.size, (8 - 1) * (6 - 1) * 2 * 2 * 9)  # blocks down × across × cells × bins
+        self.assertEqual(hog_image.shape, (64, 48))
+        self.assertGreater(hog_image.max(), 0)
+        gray, _ = extract_hog(image, 4, (8, 8), (2, 2), gradients="Grayscale")
+        self.assertEqual(gray.size, 7 * 5 * 2 * 2 * 4)
+        tall, _ = extract_hog(image, 9, (16, 8), (1, 3))  # 4 × 6 cells of 16 × 8 px, blocks 1 cell high, 3 wide
+        self.assertEqual(tall.size, (4 - 0) * (6 - 2) * 1 * 3 * 9)
+        with self.assertRaises(ValueError):
+            extract_hog(image, 9, (16, 16), (4, 4))  # a 64 px block in a 48 px wide image
+        with self.assertRaises(ValueError):
+            extract_hog(image, 9, (8, 16), (2, 4))  # 64 px wide again, though only 16 px high
+
+    def test_hog_views(self) -> None:
+        image = Image.new("RGB", (2, 1), (100, 100, 100))
+        hog_image = np.array([[0.0, 0.5]])
+        self.assertEqual(list(show_hog(image, hog_image).getdata()), [0, 255])
+        self.assertEqual(list(show_hog(image, np.zeros((1, 2))).getdata()), [0, 0])
+        over = show_hog(image, hog_image, "Over the image", brightness=0.5)
+        self.assertEqual(over.getpixel((0, 0)), (50, 50, 50))
+        self.assertEqual(over.getpixel((1, 0)), (255, 217, 0))
+        self.assertEqual(show_hog(image, hog_image, "Side by side").size, (4, 1))
+        for view in HOG_VIEWS:
+            self.assertEqual(show_hog(image, hog_image, view).height, 1, view)
 
     def test_registry_rejects_duplicate_ids(self) -> None:
         with self.assertRaises(ValueError):
