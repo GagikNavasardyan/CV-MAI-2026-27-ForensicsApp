@@ -12,6 +12,7 @@ from .registry import ToolRegistry
 from .sharpening import SharpeningTool
 from .split_channel import SplitChannelTool
 from .swap_channels import SwapChannelsTool
+from .template_matching import TemplateMatchingTool
 
 
 def build_tool_registry() -> ToolRegistry:
@@ -28,6 +29,7 @@ def build_tool_registry() -> ToolRegistry:
             ImageFiltersTool(),
             EdgeDetectionTool(),
             SharpeningTool(),
+            TemplateMatchingTool(),
         ]
     )
 
