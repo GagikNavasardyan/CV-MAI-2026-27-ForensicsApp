@@ -17,6 +17,7 @@ from forensics_app.tools.edge_detection import VIEWS, detect_edges, show_edges
 from forensics_app.tools.grayscale import GrayscaleTool
 from forensics_app.tools.histogram import histogram_image
 from forensics_app.tools.hog import VIEWS as HOG_VIEWS, extract_hog, show_hog
+from forensics_app.tools.person_detection import detect_person, show_detection
 from forensics_app.tools.registry import ToolRegistry
 from forensics_app.tools.split_channel import SplitChannelTool
 from forensics_app.tools.swap_channels import swap_channels
@@ -235,6 +236,43 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(show_hog(image, hog_image, "Side by side").size, (4, 1))
         for view in HOG_VIEWS:
             self.assertEqual(show_hog(image, hog_image, view).height, 1, view)
+
+    def test_person_detection_finds_the_template_in_a_flat_scene(self) -> None:
+        template = Image.new("RGB", (16, 32), (60, 60, 60))
+        template.paste((230, 230, 230), (4, 4, 12, 28))
+        scene = Image.new("RGB", (64, 48), (120, 120, 120))
+        scene.paste(template, (37, 11))  # x, y: the last possible column, so the scan must reach it
+        detection = detect_person(scene, template, orientations=9, step=1)
+        self.assertEqual(detection.best_euclidean, (11, 37))  # (row, column)
+        self.assertEqual(detection.best_dot, (11, 37))
+        self.assertEqual(detection.windows, (48 - 32 + 1) * (64 - 16 + 1))
+        self.assertAlmostEqual(detection.euclidean.min(), 0.0)
+        coarse = detect_person(scene, template, orientations=9, step=4)
+        self.assertEqual((coarse.rows.size, coarse.cols.size), (5, 13))
+        with self.assertRaises(ValueError):
+            detect_person(template, scene)  # the template is larger than the image
+        with self.assertRaises(ValueError):
+            detect_person(scene, template, step=0)
+
+    def test_person_detection_views(self) -> None:
+        template = Image.new("RGB", (16, 32), (60, 60, 60))
+        template.paste((230, 230, 230), (4, 4, 12, 28))
+        scene = Image.new("RGB", (40, 40), (120, 120, 120))
+        scene.paste(template, (10, 5))
+        detection = detect_person(scene, template, orientations=9, step=1)
+        boxed = show_detection(scene, detection, "Euclidean distance")
+        self.assertEqual(boxed.size, scene.size)
+        self.assertEqual(boxed.getpixel((10, 5)), (255, 0, 0))  # top-left corner of the box
+        self.assertEqual(boxed.getpixel((25, 36)), (255, 0, 0))  # bottom-right corner
+        self.assertEqual(boxed.getpixel((0, 0)), (120, 120, 120))
+        self.assertEqual(show_detection(scene, detection, "Dot product").getpixel((10, 5)), (255, 0, 0))
+        side = show_detection(scene, detection)
+        title_height = side.height - 40
+        self.assertGreater(title_height, 0)  # titles below the panels
+        self.assertEqual(side.width, 3 * 40 + 2 * 8)
+        self.assertEqual(side.getpixel((10, 5)), (60, 60, 60))  # the first panel has no box
+        self.assertEqual(side.getpixel((48 + 10, 5)), (255, 0, 0))  # the second one has
+        self.assertTrue((np.asarray(side)[40:] < 128).any())  # some dark title text
 
     def test_registry_rejects_duplicate_ids(self) -> None:
         with self.assertRaises(ValueError):

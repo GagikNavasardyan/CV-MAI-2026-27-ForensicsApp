@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import re
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -51,10 +52,7 @@ def extract_hog(
     if block_height > image.height or block_width > image.width:
         raise ValueError(f"A block is {block_width} × {block_height} px (width × height), "
                          f"larger than the {image.width} × {image.height} image.")
-    if gradients == GRADIENTS[0] and image.mode not in ("L", "1", "I", "F"):
-        pixels, channel_axis = np.asarray(image.convert("RGB"), dtype=np.float64) / 255.0, -1
-    else:
-        pixels, channel_axis = np.asarray(image.convert("L"), dtype=np.float64) / 255.0, None
+    pixels, channel_axis = hog_pixels(image, gradients)
     return feature.hog(
         pixels,
         orientations=orientations,
@@ -64,6 +62,13 @@ def extract_hog(
         visualize=True,
         channel_axis=channel_axis,
     )
+
+
+def hog_pixels(image: Image.Image, gradients: str = GRADIENTS[0]) -> tuple[np.ndarray, int | None]:
+    """The image scaled to 0–1 for ``feature.hog``, with its ``channel_axis`` (``None`` for grayscale)."""
+    if gradients == GRADIENTS[0] and image.mode not in ("L", "1", "I", "F"):
+        return np.asarray(image.convert("RGB"), dtype=np.float64) / 255.0, -1
+    return np.asarray(image.convert("L"), dtype=np.float64) / 255.0, None
 
 
 def show_hog(
@@ -93,7 +98,7 @@ def _is_digits(text: str) -> bool:
     return re.fullmatch(r"\d*", text) is not None
 
 
-def _read_number(variable: tk.StringVar, label: str, minimum: int, maximum: int) -> int:
+def read_number(variable: tk.StringVar, label: str, minimum: int, maximum: int) -> int:
     """The typed whole number; raises ``ValueError`` with a message for the status line."""
     try:
         number = int(variable.get())
@@ -102,6 +107,91 @@ def _read_number(variable: tk.StringVar, label: str, minimum: int, maximum: int)
     if not minimum <= number <= maximum:
         raise ValueError(f"{label} must be between {minimum:g} and {maximum:g}.")
     return number
+
+
+def number_row(parent: tk.Misc, label: str, default: int, minimum: int, maximum: int,
+               on_change: Callable[[], None]) -> tk.StringVar:
+    """A slider with a box for typing the exact whole number; either one updates the other."""
+    row = ttk.Frame(parent)
+    row.pack(fill="x", pady=(6, 0))
+    ttk.Label(row, text=label, width=17).pack(side="left")
+    variable = tk.StringVar(parent, value=str(default))
+    slider = ttk.Scale(row, from_=minimum, to=maximum, length=160, value=default)
+    slider.pack(side="left", padx=8)
+    only_digits = (parent.register(_is_digits), "%P")
+    ttk.Entry(row, textvariable=variable, width=7, justify="center",
+              validate="key", validatecommand=only_digits).pack(side="left")
+    syncing = False
+
+    def slider_moved(value: str) -> None:
+        if not syncing:
+            variable.set(str(round(float(value))))
+
+    def text_changed(*_: object) -> None:
+        nonlocal syncing
+        try:
+            number = int(variable.get())
+        except ValueError:
+            number = None
+        if number is not None and minimum <= number <= maximum:
+            syncing = True
+            slider.set(number)
+            syncing = False
+        on_change()
+
+    slider.configure(command=slider_moved)
+    variable.trace_add("write", text_changed)
+    return variable
+
+
+def choice_row(parent: tk.Misc, label: str, options: tuple[str, ...], on_change: Callable[[], None]) -> tk.StringVar:
+    """A row of toggle buttons; the first option starts selected."""
+    row = ttk.Frame(parent)
+    row.pack(fill="x", pady=(8, 0))
+    ttk.Label(row, text=label, width=17).pack(side="left")
+    variable = tk.StringVar(parent, value=options[0])
+    for option in options:
+        ttk.Radiobutton(row, text=option, value=option, variable=variable,
+                        style="Toolbutton").pack(side="left", padx=(0, 4))
+    variable.trace_add("write", lambda *_: on_change())
+    return variable
+
+
+def hog_controls(
+    parent: tk.Misc, parameters: dict[str, tuple[str, int, int, int]], on_change: Callable[[], None]
+) -> Callable[[], dict[str, Any]]:
+    """Add the HOG settings and a reset button to ``parent``; return a function reading them.
+
+    The reader returns ``extract_hog``'s keyword arguments, raising ``ValueError`` for bad input.
+    """
+    values = {name: number_row(parent, *spec, on_change) for name, spec in parameters.items()}
+    ttk.Label(parent, text="Equal height and width give square cells or blocks.",
+              foreground="#666666").pack(anchor="w", pady=(4, 0))
+    block_norm = choice_row(parent, "Block norm", BLOCK_NORMS, on_change)
+    gradients = choice_row(parent, "Gradients from", GRADIENTS, on_change)
+
+    def reset() -> None:
+        for name, (_, default, _, _) in parameters.items():
+            values[name].set(str(default))
+        block_norm.set(BLOCK_NORMS[0])
+        gradients.set(GRADIENTS[0])
+
+    ttk.Button(parent, text="Reset to defaults", command=reset).pack(anchor="w", pady=(8, 0))
+
+    def read() -> dict[str, Any]:
+        numbers = {}
+        for name, variable in values.items():
+            label, _, minimum, maximum = parameters[name]
+            numbers[name] = read_number(variable, label, minimum, maximum)
+        return {
+            "orientations": numbers["orientations"],
+            "pixels_per_cell": (numbers["cell_rows"], numbers["cell_cols"]),
+            "cells_per_block": (numbers["block_rows"], numbers["block_cols"]),
+            "block_norm": block_norm.get(),
+            "gradients": gradients.get(),
+        }
+
+    return read
 
 
 def ask_hog(
@@ -134,85 +224,15 @@ def ask_hog(
     hog_cache: tuple[tuple[Any, ...], tuple[np.ndarray, np.ndarray]] | None = None  # HOG is slow; restyling is not
     preview: tuple[tuple[Any, ...], Image.Image] | None = None
     photo: ImageTk.PhotoImage | None = None
-    only_digits = (dialog.register(_is_digits), "%P")
-    syncing = False
-
-    def add_number(parent: tk.Misc, label: str, default: int, minimum: int, maximum: int) -> tk.StringVar:
-        """A slider with a box for typing the exact value; either one updates the other."""
-        row = ttk.Frame(parent)
-        row.pack(fill="x", pady=(6, 0))
-        ttk.Label(row, text=label, width=17).pack(side="left")
-        variable = tk.StringVar(dialog, value=str(default))
-        slider = ttk.Scale(row, from_=minimum, to=maximum, length=160, value=default)
-        slider.pack(side="left", padx=8)
-        ttk.Entry(row, textvariable=variable, width=7, justify="center",
-                  validate="key", validatecommand=only_digits).pack(side="left")
-
-        def slider_moved(value: str) -> None:
-            if not syncing:
-                variable.set(str(round(float(value))))
-
-        def text_changed(*_: object) -> None:
-            nonlocal syncing
-            try:
-                number = int(variable.get())
-            except ValueError:
-                number = None
-            if number is not None and minimum <= number <= maximum:
-                syncing = True
-                slider.set(number)
-                syncing = False
-            schedule_preview()
-
-        slider.configure(command=slider_moved)
-        variable.trace_add("write", text_changed)
-        return variable
-
-    def add_choice(parent: tk.Misc, label: str, options: tuple[str, ...]) -> tk.StringVar:
-        row = ttk.Frame(parent)
-        row.pack(fill="x", pady=(8, 0))
-        ttk.Label(row, text=label, width=17).pack(side="left")
-        variable = tk.StringVar(dialog, value=options[0])
-        for option in options:
-            ttk.Radiobutton(row, text=option, value=option, variable=variable,
-                            style="Toolbutton").pack(side="left", padx=(0, 4))
-        variable.trace_add("write", lambda *_: schedule_preview())
-        return variable
 
     ttk.Label(controls, text="HOG parameters").pack(anchor="w")
-    hog_values = {name: add_number(controls, *spec) for name, spec in PARAMETERS.items()}
-    ttk.Label(controls, text="Equal height and width give square cells or blocks.",
-              foreground="#666666").pack(anchor="w", pady=(4, 0))
-    block_norm = add_choice(controls, "Block norm", BLOCK_NORMS)
-    gradients = add_choice(controls, "Gradients from", GRADIENTS)
-
-    def reset() -> None:
-        for name, (_, default, _, _) in PARAMETERS.items():
-            hog_values[name].set(str(default))
-        block_norm.set(BLOCK_NORMS[0])
-        gradients.set(GRADIENTS[0])
-
-    ttk.Button(controls, text="Reset to defaults", command=reset).pack(anchor="w", pady=(8, 0))
+    hog_parameters = hog_controls(controls, PARAMETERS, lambda: schedule_preview())
 
     ttk.Label(controls, text="Show", padding=(0, 16, 0, 0)).pack(anchor="w")
     view = tk.StringVar(dialog, value=VIEWS[0])
     for option in VIEWS:
         ttk.Radiobutton(controls, text=option, value=option, variable=view).pack(anchor="w", pady=(2, 0))
     view.trace_add("write", lambda *_: schedule_preview())
-
-    def hog_parameters() -> dict[str, Any]:
-        numbers = {}
-        for name, variable in hog_values.items():
-            label, _, minimum, maximum = PARAMETERS[name]
-            numbers[name] = _read_number(variable, label, minimum, maximum)
-        current: dict[str, Any] = {
-            "orientations": numbers["orientations"],
-            "pixels_per_cell": (numbers["cell_rows"], numbers["cell_cols"]),
-            "cells_per_block": (numbers["block_rows"], numbers["block_cols"]),
-        }
-        current["block_norm"] = block_norm.get()
-        current["gradients"] = gradients.get()
-        return current
 
     def compute() -> tuple[tuple[Any, ...], dict[str, Any], np.ndarray, Image.Image]:
         nonlocal hog_cache
