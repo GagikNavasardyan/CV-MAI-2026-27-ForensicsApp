@@ -18,6 +18,7 @@ from forensics_app.tools.edge_detection import VIEWS, detect_edges, show_edges
 from forensics_app.tools.grayscale import GrayscaleTool
 from forensics_app.tools.histogram import histogram_image
 from forensics_app.tools.hog import VIEWS as HOG_VIEWS, extract_hog, show_hog
+from forensics_app.tools.keypoints import VIEWS as KEYPOINT_VIEWS, Keypoints, extract_keypoints, show_keypoints
 from forensics_app.tools.person_detection import detect_person, show_detection
 from forensics_app.tools.registry import ToolRegistry
 from forensics_app.tools.split_channel import SplitChannelTool
@@ -313,6 +314,46 @@ class ToolTests(unittest.TestCase):
         self.assertNotEqual(response_map.getpixel((10, 5)), response_map.getpixel((0, 0)))
         for view in CORNER_VIEWS:
             self.assertEqual(show_corners(image, response, corners, view).height, 10, view)
+
+    def test_keypoint_extractors_return_descriptors(self) -> None:
+        rng = np.random.default_rng(0)
+        image = Image.fromarray(rng.integers(0, 256, (96, 128)).astype(np.uint8))
+        orb = extract_keypoints(image, "ORB", n_keypoints=30)
+        self.assertEqual(len(orb), 30)
+        self.assertEqual(orb.descriptors.shape, (30, 256))  # 256 binary tests per keypoint
+        self.assertEqual(orb.descriptors.dtype, bool)
+        sift = extract_keypoints(image, "SIFT", n_octaves=3)
+        self.assertGreater(len(sift), 0)
+        self.assertEqual(sift.descriptors.shape, (len(sift), 128))  # 4 × 4 cells × 8 orientations
+        for keypoints in (orb, sift):
+            self.assertEqual(keypoints.sizes.shape, (len(keypoints),))
+            self.assertTrue(((keypoints.points >= 0) & (keypoints.points < (96, 128))).all())
+        flat = extract_keypoints(Image.new("L", (40, 40), 90), "SIFT")  # skimage raises; we return nothing
+        self.assertEqual((len(flat), flat.descriptors.shape), (0, (0, 128)))
+        with self.assertRaises(ValueError):
+            extract_keypoints(image, "Unknown")
+
+    def test_keypoint_orientations_point_along_the_image_axes(self) -> None:
+        square = np.zeros((100, 100), dtype=np.uint8)
+        square[40:80, 40:80] = 255
+        sift = extract_keypoints(Image.fromarray(square), "SIFT")
+        near = np.hypot(*(sift.points - (47, 47)).T) < 3  # the top-left corner
+        angles = np.degrees(sift.orientations[near]) % 360
+        self.assertGreater(len(angles), 0)
+        self.assertTrue(((angles >= 0) & (angles <= 90)).all(), angles)  # gradients point right (+x) and down (+y)
+
+    def test_keypoint_views(self) -> None:
+        image = Image.new("L", (40, 30), 100)
+        keypoints = Keypoints("ORB", np.array([[15.0, 20.0]]), np.array([8.0]), np.array([0.0]), np.zeros((1, 256)))
+        fixed = show_keypoints(image, keypoints, radius=3)
+        self.assertEqual(fixed.getpixel((23, 15)), (255, 0, 0))  # right edge of the circle
+        self.assertEqual(fixed.getpixel((28, 15)), (100, 100, 100))
+        rich = show_keypoints(image, keypoints, "Size and orientation")
+        self.assertEqual(rich.getpixel((28, 15)), (255, 0, 0))  # the circle has the keypoint's size
+        self.assertEqual(rich.getpixel((24, 15)), (255, 0, 0))  # the orientation line points along +x
+        self.assertEqual(rich.getpixel((16, 15)), (100, 100, 100))  # and not the other way
+        for view in KEYPOINT_VIEWS:
+            self.assertEqual(show_keypoints(image, keypoints, view).size, image.size, view)
 
     def test_registry_rejects_duplicate_ids(self) -> None:
         with self.assertRaises(ValueError):

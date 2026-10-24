@@ -9,6 +9,7 @@ from .histogram import HistogramTool
 from .hog import HogTool
 from .image_filters import ImageFiltersTool
 from .image_info import ImageInfoTool
+from .keypoints import KeypointsTool
 from .masking import MaskingTool
 from .person_detection import PersonDetectionTool
 from .registry import ToolRegistry
@@ -36,6 +37,7 @@ def build_tool_registry() -> ToolRegistry:
             HogTool(),
             PersonDetectionTool(),
             CornerDetectionTool(),
+            KeypointsTool(),
         ]
     )
 

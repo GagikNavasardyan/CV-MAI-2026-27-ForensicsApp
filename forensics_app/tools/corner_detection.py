@@ -169,18 +169,18 @@ def read_decimal(variable: tk.StringVar, label: str, minimum: float, maximum: fl
 
 
 def setting_rows(parent: tk.Misc, parameters: dict[str, tuple[str, float, float, float]],
-                 on_change: Callable[[], None]) -> dict[str, tk.StringVar]:
-    """One slider row per setting: whole numbers for ``INTEGER_SETTINGS``, decimals otherwise."""
-    return {name: (number_row if name in INTEGER_SETTINGS else decimal_row)(parent, *spec, on_change)
+                 on_change: Callable[[], None], integers: set[str] = INTEGER_SETTINGS) -> dict[str, tk.StringVar]:
+    """One slider row per setting: whole numbers for those in ``integers``, decimals otherwise."""
+    return {name: (number_row if name in integers else decimal_row)(parent, *spec, on_change)
             for name, spec in parameters.items()}
 
 
-def read_settings(values: dict[str, tk.StringVar],
-                  parameters: dict[str, tuple[str, float, float, float]]) -> dict[str, float]:
+def read_settings(values: dict[str, tk.StringVar], parameters: dict[str, tuple[str, float, float, float]],
+                  integers: set[str] = INTEGER_SETTINGS) -> dict[str, float]:
     settings = {}
     for name, variable in values.items():
         label, _, minimum, maximum = parameters[name]
-        read = read_number if name in INTEGER_SETTINGS else read_decimal
+        read = read_number if name in integers else read_decimal
         settings[name] = read(variable, label, minimum, maximum)
     return settings
 
