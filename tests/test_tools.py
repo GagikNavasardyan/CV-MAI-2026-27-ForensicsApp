@@ -13,6 +13,7 @@ from forensics_app.tools.convolution import (
     convolve,
     sobel,
 )
+from forensics_app.tools.corner_detection import VIEWS as CORNER_VIEWS, corner_response, find_corners, show_corners
 from forensics_app.tools.edge_detection import VIEWS, detect_edges, show_edges
 from forensics_app.tools.grayscale import GrayscaleTool
 from forensics_app.tools.histogram import histogram_image
@@ -273,6 +274,45 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(side.getpixel((10, 5)), (60, 60, 60))  # the first panel has no box
         self.assertEqual(side.getpixel((48 + 10, 5)), (255, 0, 0))  # the second one has
         self.assertTrue((np.asarray(side)[40:] < 128).any())  # some dark title text
+
+    def test_corner_detection_finds_the_corners_of_a_square(self) -> None:
+        image = Image.new("L", (40, 40), 0)
+        image.paste(255, (10, 10, 30, 30))  # corners at rows/columns 10 and 29
+        expected = {(10, 10), (10, 29), (29, 10), (29, 29)}
+        # a right angle leaves only 11 of FAST's 16 circle pixels darker in a row, so n=12 misses it
+        self.assertEqual(len(find_corners(corner_response(image, "FAST", n=12))), 0)
+        for detector, parameters in (("FAST", {"n": 9}), ("Harris", {})):
+            corners = find_corners(corner_response(image, detector, **parameters), min_distance=5)
+            found = {tuple(int(v) for v in corner) for corner in corners}
+            self.assertEqual(len(found), 4, detector)
+            for corner in expected:  # each detected within a pixel or two
+                self.assertTrue(any(abs(corner[0] - r) <= 2 and abs(corner[1] - c) <= 2 for r, c in found), detector)
+        self.assertEqual(len(find_corners(corner_response(Image.new("L", (20, 20), 90), "Harris"))), 0)
+        with self.assertRaises(ValueError):
+            corner_response(image, "Unknown")
+
+    def test_corner_peak_threshold_drops_weak_corners(self) -> None:
+        response = np.zeros((30, 30))
+        response[5, 5], response[20, 20] = 1.0, 0.2
+        self.assertEqual(len(find_corners(response, threshold_rel=0.1)), 2)
+        self.assertEqual(find_corners(response, threshold_rel=0.5).tolist(), [[5, 5]])
+        response[7, 7] = 0.9  # within min_distance of the strongest peak
+        self.assertEqual(len(find_corners(response, threshold_rel=0.1, min_distance=1)), 3)
+        self.assertEqual(len(find_corners(response, threshold_rel=0.1, min_distance=3)), 2)
+
+    def test_corner_views(self) -> None:
+        image = Image.new("L", (20, 10), 100)
+        response = np.zeros((10, 20))
+        response[5, 10] = 1.0
+        corners = np.array([[5, 10]])
+        marked = show_corners(image, response, corners, radius=3)
+        self.assertEqual(marked.getpixel((13, 5)), (255, 0, 0))  # right edge of the circle
+        self.assertEqual(marked.getpixel((10, 5)), (100, 100, 100))  # its centre stays visible
+        self.assertEqual(show_corners(image, response, corners, "Side by side").size, (40, 10))
+        response_map = show_corners(image, response, corners, "Response map")
+        self.assertNotEqual(response_map.getpixel((10, 5)), response_map.getpixel((0, 0)))
+        for view in CORNER_VIEWS:
+            self.assertEqual(show_corners(image, response, corners, view).height, 10, view)
 
     def test_registry_rejects_duplicate_ids(self) -> None:
         with self.assertRaises(ValueError):
