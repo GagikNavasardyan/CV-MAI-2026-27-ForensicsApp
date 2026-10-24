@@ -2,12 +2,14 @@
 
 from .contrast_stretching import ContrastStretchingTool
 from .convolution import ConvolutionTool
+from .corner_detection import CornerDetectionTool
 from .edge_detection import EdgeDetectionTool
 from .grayscale import GrayscaleTool
 from .histogram import HistogramTool
 from .hog import HogTool
 from .image_filters import ImageFiltersTool
 from .image_info import ImageInfoTool
+from .keypoints import KeypointsTool
 from .masking import MaskingTool
 from .person_detection import PersonDetectionTool
 from .registry import ToolRegistry
@@ -34,6 +36,8 @@ def build_tool_registry() -> ToolRegistry:
             TemplateMatchingTool(),
             HogTool(),
             PersonDetectionTool(),
+            CornerDetectionTool(),
+            KeypointsTool(),
         ]
     )
 
