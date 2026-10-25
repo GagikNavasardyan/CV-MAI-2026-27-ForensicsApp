@@ -13,10 +13,13 @@ from forensics_app.tools.convolution import (
     convolve,
     sobel,
 )
+from forensics_app.tools.corner_detection import VIEWS as CORNER_VIEWS, corner_response, find_corners, show_corners
+from forensics_app.tools.dialogs import preview_copy
 from forensics_app.tools.edge_detection import VIEWS, detect_edges, show_edges
 from forensics_app.tools.grayscale import GrayscaleTool
 from forensics_app.tools.histogram import histogram_image
 from forensics_app.tools.hog import VIEWS as HOG_VIEWS, extract_hog, show_hog
+from forensics_app.tools.keypoints import VIEWS as KEYPOINT_VIEWS, Keypoints, extract_keypoints, show_keypoints
 from forensics_app.tools.person_detection import detect_person, show_detection
 from forensics_app.tools.registry import ToolRegistry
 from forensics_app.tools.split_channel import SplitChannelTool
@@ -273,6 +276,104 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(side.getpixel((10, 5)), (60, 60, 60))  # the first panel has no box
         self.assertEqual(side.getpixel((48 + 10, 5)), (255, 0, 0))  # the second one has
         self.assertTrue((np.asarray(side)[40:] < 128).any())  # some dark title text
+
+    def test_corner_detection_finds_the_corners_of_a_square(self) -> None:
+        image = Image.new("L", (40, 40), 0)
+        image.paste(255, (10, 10, 30, 30))  # corners at rows/columns 10 and 29
+        expected = {(10, 10), (10, 29), (29, 10), (29, 29)}
+        # a right angle leaves only 11 of FAST's 16 circle pixels darker in a row, so n=12 misses it
+        self.assertEqual(len(find_corners(corner_response(image, "FAST", n=12))), 0)
+        for detector, parameters in (("FAST", {"n": 9}), ("Harris", {})):
+            corners = find_corners(corner_response(image, detector, **parameters), min_distance=5)
+            found = {tuple(int(v) for v in corner) for corner in corners}
+            self.assertEqual(len(found), 4, detector)
+            for corner in expected:  # each detected within a pixel or two
+                self.assertTrue(any(abs(corner[0] - r) <= 2 and abs(corner[1] - c) <= 2 for r, c in found), detector)
+        self.assertEqual(len(find_corners(corner_response(Image.new("L", (20, 20), 90), "Harris"))), 0)
+        with self.assertRaises(ValueError):
+            corner_response(image, "Unknown")
+
+    def test_corner_peak_threshold_drops_weak_corners(self) -> None:
+        response = np.zeros((30, 30))
+        response[5, 5], response[20, 20] = 1.0, 0.2
+        self.assertEqual(len(find_corners(response, threshold_rel=0.1)), 2)
+        self.assertEqual(find_corners(response, threshold_rel=0.5).tolist(), [[5, 5]])
+        response[7, 7] = 0.9  # within min_distance of the strongest peak
+        self.assertEqual(len(find_corners(response, threshold_rel=0.1, min_distance=1)), 3)
+        self.assertEqual(len(find_corners(response, threshold_rel=0.1, min_distance=3)), 2)
+
+    def test_corner_views(self) -> None:
+        image = Image.new("L", (20, 10), 100)
+        response = np.zeros((10, 20))
+        response[5, 10] = 1.0
+        corners = np.array([[5, 10]])
+        marked = show_corners(image, response, corners, radius=3)
+        self.assertEqual(marked.getpixel((13, 5)), (255, 0, 0))  # right edge of the circle
+        self.assertEqual(marked.getpixel((10, 5)), (100, 100, 100))  # its centre stays visible
+        self.assertEqual(show_corners(image, response, corners, "Side by side").size, (40, 10))
+        response_map = show_corners(image, response, corners, "Response map")
+        self.assertNotEqual(response_map.getpixel((10, 5)), response_map.getpixel((0, 0)))
+        for view in CORNER_VIEWS:
+            self.assertEqual(show_corners(image, response, corners, view).height, 10, view)
+
+    def test_keypoint_extractors_return_descriptors(self) -> None:
+        rng = np.random.default_rng(0)
+        image = Image.fromarray(rng.integers(0, 256, (96, 128)).astype(np.uint8))
+        orb = extract_keypoints(image, "ORB", n_keypoints=30)
+        self.assertEqual(len(orb), 30)
+        self.assertEqual(orb.descriptors.shape, (30, 256))  # 256 binary tests per keypoint
+        self.assertEqual(orb.descriptors.dtype, bool)
+        sift = extract_keypoints(image, "SIFT", n_octaves=3)
+        self.assertGreater(len(sift), 0)
+        self.assertEqual(sift.descriptors.shape, (len(sift), 128))  # 4 × 4 cells × 8 orientations
+        for keypoints in (orb, sift):
+            self.assertEqual(keypoints.sizes.shape, (len(keypoints),))
+            self.assertTrue(((keypoints.points >= 0) & (keypoints.points < (96, 128))).all())
+        flat = extract_keypoints(Image.new("L", (40, 40), 90), "SIFT")  # skimage raises; we return nothing
+        self.assertEqual((len(flat), flat.descriptors.shape), (0, (0, 128)))
+        with self.assertRaises(ValueError):
+            extract_keypoints(image, "Unknown")
+
+    def test_keypoint_orientations_point_along_the_image_axes(self) -> None:
+        square = np.zeros((100, 100), dtype=np.uint8)
+        square[40:80, 40:80] = 255
+        sift = extract_keypoints(Image.fromarray(square), "SIFT")
+        near = np.hypot(*(sift.points - (47, 47)).T) < 3  # the top-left corner
+        angles = np.degrees(sift.orientations[near]) % 360
+        self.assertGreater(len(angles), 0)
+        self.assertTrue(((angles >= 0) & (angles <= 90)).all(), angles)  # gradients point right (+x) and down (+y)
+
+    def test_keypoint_views(self) -> None:
+        image = Image.new("L", (40, 30), 100)
+        keypoints = Keypoints("ORB", np.array([[15.0, 20.0]]), np.array([8.0]), np.array([0.0]), np.zeros((1, 256)))
+        fixed = show_keypoints(image, keypoints, radius=3)
+        self.assertEqual(fixed.getpixel((23, 15)), (255, 0, 0))  # right edge of the circle
+        self.assertEqual(fixed.getpixel((28, 15)), (100, 100, 100))
+        rich = show_keypoints(image, keypoints, "Size and orientation")
+        self.assertEqual(rich.getpixel((28, 15)), (255, 0, 0))  # the circle has the keypoint's size
+        self.assertEqual(rich.getpixel((24, 15)), (255, 0, 0))  # the orientation line points along +x
+        self.assertEqual(rich.getpixel((16, 15)), (100, 100, 100))  # and not the other way
+        for view in KEYPOINT_VIEWS:
+            self.assertEqual(show_keypoints(image, keypoints, view).size, image.size, view)
+
+    def test_sift_sigma_must_survive_the_upsampling(self) -> None:
+        rng = np.random.default_rng(0)
+        image = Image.fromarray(rng.integers(0, 256, (64, 64)).astype(np.uint8))
+        for upsampling, too_small, smallest in ((4, 1.6, 2.0), (2, 0.99, 1.0), (1, 0.49, 0.5)):
+            with self.assertRaisesRegex(ValueError, f"at least {smallest:g}"):
+                extract_keypoints(image, "SIFT", upsampling=upsampling, sigma_min=too_small, n_octaves=2)
+            extract_keypoints(image, "SIFT", upsampling=upsampling, sigma_min=smallest, n_octaves=2)  # no error
+
+    def test_large_images_preview_on_a_smaller_copy(self) -> None:
+        small = Image.new("L", (800, 600))
+        self.assertEqual(preview_copy(small, 1200), (small, 1.0))
+        copy, factor = preview_copy(Image.new("L", (3000, 2000)), 1200)
+        self.assertEqual(copy.size, (1200, 800))
+        self.assertAlmostEqual(factor, 2.5)
+        keypoints = Keypoints("SIFT", np.array([[10.0, 20.0]]), np.array([3.0]), np.array([1.0]), np.ones((1, 128)))
+        full = keypoints.scaled(factor)
+        self.assertEqual(full.points.tolist(), [[25.0, 50.0]])
+        self.assertEqual((full.sizes.tolist(), full.orientations.tolist()), ([7.5], [1.0]))
 
     def test_registry_rejects_duplicate_ids(self) -> None:
         with self.assertRaises(ValueError):

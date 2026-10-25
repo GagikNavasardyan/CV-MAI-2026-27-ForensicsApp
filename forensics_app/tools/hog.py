@@ -144,12 +144,13 @@ def number_row(parent: tk.Misc, label: str, default: int, minimum: int, maximum:
     return variable
 
 
-def choice_row(parent: tk.Misc, label: str, options: tuple[str, ...], on_change: Callable[[], None]) -> tk.StringVar:
-    """A row of toggle buttons; the first option starts selected."""
+def choice_row(parent: tk.Misc, label: str, options: tuple[str, ...], on_change: Callable[[], None],
+               default: str | None = None) -> tk.StringVar:
+    """A row of toggle buttons; ``default`` (or else the first option) starts selected."""
     row = ttk.Frame(parent)
     row.pack(fill="x", pady=(8, 0))
     ttk.Label(row, text=label, width=17).pack(side="left")
-    variable = tk.StringVar(parent, value=options[0])
+    variable = tk.StringVar(parent, value=default or options[0])
     for option in options:
         ttk.Radiobutton(row, text=option, value=option, variable=variable,
                         style="Toolbutton").pack(side="left", padx=(0, 4))
