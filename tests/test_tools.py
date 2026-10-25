@@ -14,6 +14,7 @@ from forensics_app.tools.convolution import (
     sobel,
 )
 from forensics_app.tools.corner_detection import VIEWS as CORNER_VIEWS, corner_response, find_corners, show_corners
+from forensics_app.tools.dialogs import preview_copy
 from forensics_app.tools.edge_detection import VIEWS, detect_edges, show_edges
 from forensics_app.tools.grayscale import GrayscaleTool
 from forensics_app.tools.histogram import histogram_image
@@ -354,6 +355,25 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(rich.getpixel((16, 15)), (100, 100, 100))  # and not the other way
         for view in KEYPOINT_VIEWS:
             self.assertEqual(show_keypoints(image, keypoints, view).size, image.size, view)
+
+    def test_sift_sigma_must_survive_the_upsampling(self) -> None:
+        rng = np.random.default_rng(0)
+        image = Image.fromarray(rng.integers(0, 256, (64, 64)).astype(np.uint8))
+        for upsampling, too_small, smallest in ((4, 1.6, 2.0), (2, 0.99, 1.0), (1, 0.49, 0.5)):
+            with self.assertRaisesRegex(ValueError, f"at least {smallest:g}"):
+                extract_keypoints(image, "SIFT", upsampling=upsampling, sigma_min=too_small, n_octaves=2)
+            extract_keypoints(image, "SIFT", upsampling=upsampling, sigma_min=smallest, n_octaves=2)  # no error
+
+    def test_large_images_preview_on_a_smaller_copy(self) -> None:
+        small = Image.new("L", (800, 600))
+        self.assertEqual(preview_copy(small, 1200), (small, 1.0))
+        copy, factor = preview_copy(Image.new("L", (3000, 2000)), 1200)
+        self.assertEqual(copy.size, (1200, 800))
+        self.assertAlmostEqual(factor, 2.5)
+        keypoints = Keypoints("SIFT", np.array([[10.0, 20.0]]), np.array([3.0]), np.array([1.0]), np.ones((1, 128)))
+        full = keypoints.scaled(factor)
+        self.assertEqual(full.points.tolist(), [[25.0, 50.0]])
+        self.assertEqual((full.sizes.tolist(), full.orientations.tolist()), ([7.5], [1.0]))
 
     def test_registry_rejects_duplicate_ids(self) -> None:
         with self.assertRaises(ValueError):

@@ -14,7 +14,7 @@ from skimage import feature
 from forensics_app.core import ImageDocument
 from .base import ForensicsTool, ToolResult
 from .corner_detection import BASES, default_radius, read_settings, setting_rows
-from .dialogs import center_over
+from .dialogs import center_over, preview_copy
 from .hog import choice_row
 
 
@@ -40,6 +40,7 @@ METHOD_PARAMETERS: dict[str, dict[str, tuple[str, float, float, float]]] = {
 }
 INTEGER_SETTINGS = {"n_keypoints", "n_scales", "fast_n", "n_octaves", "radius"}
 UPSAMPLING = ("1", "2", "4")  # SIFT enlarges the image this much before the first octave
+SIGMA_IN = 0.5  # the blur skimage's SIFT assumes the image already has
 DESCRIPTOR_SIZES = {"ORB": "256 bits (binary)", "SIFT": "128 values"}
 VIEWS = ("Keypoints", "Size and orientation")
 MARKER_COLOUR = (255, 0, 0)
@@ -60,12 +61,16 @@ class Keypoints:
     def __len__(self) -> int:
         return len(self.points)
 
+    def scaled(self, factor: float) -> Keypoints:
+        """The keypoints of an image ``factor`` times larger; the descriptors are unchanged."""
+        return Keypoints(self.method, self.points * factor, self.sizes * factor, self.orientations, self.descriptors)
+
 
 def extract_keypoints(image: Image.Image, method: str = METHODS[0], **parameters: float) -> Keypoints:
     """Run ``skimage.feature.ORB`` or ``SIFT`` ``detect_and_extract`` on the grayscale image (scaled to 0–1).
 
     ``parameters`` are the extractor's own keyword arguments. Finding no keypoints is not an error:
-    the result is then empty.
+    the result is then empty. Raises ``ValueError`` for a SIFT sigma too small for its upsampling.
     """
     gray = np.asarray(image.convert("L"), dtype=np.float64) / 255.0
     if method == "ORB":
@@ -73,6 +78,11 @@ def extract_keypoints(image: Image.Image, method: str = METHODS[0], **parameters
         extractor = feature.ORB(**{**parameters, **integers})
         descriptor_length = 256
     elif method == "SIFT":
+        # skimage divides sigma by the upsampling, then blurs by sqrt(sigma² − SIGMA_IN²), which fails below SIGMA_IN.
+        upsampling, sigma = int(parameters.get("upsampling", 2)), parameters.get("sigma_min", 1.6)
+        if sigma / upsampling < SIGMA_IN:
+            raise ValueError(f"With ×{upsampling} upsampling, sigma must be at least {SIGMA_IN * upsampling:g} "
+                             f"(skimage needs sigma ÷ upsampling ≥ {SIGMA_IN:g}).")
         integers = {name: int(parameters[name]) for name in ("upsampling", "n_octaves", "n_scales") if name in parameters}
         extractor = feature.SIFT(**{**parameters, **integers})
         descriptor_length = 128
@@ -140,7 +150,9 @@ def ask_keypoints(
     status.pack(anchor="w")
 
     preview_job: str | None = None
-    keypoints_cache: tuple[tuple[Any, ...], Keypoints] | None = None  # extracting is slow; restyling is not
+    small, factor = preview_copy(image)  # a large image previews on a smaller copy; Apply uses the full one
+    reduced = factor > 1
+    keypoints_cache: dict[bool, tuple[tuple[Any, ...], Keypoints]] = {}  # by full size; extracting is slow, restyling is not
     preview: tuple[tuple[Any, ...], Image.Image] | None = None
     photo: ImageTk.PhotoImage | None = None
 
@@ -184,18 +196,21 @@ def ask_keypoints(
               foreground="#666666").pack(anchor="w", pady=(4, 0))
     base = choice_row(controls, "Draw on", BASES, changed)
 
-    def compute() -> tuple[tuple[Any, ...], dict[str, Any], dict[str, Any], Keypoints, Image.Image]:
-        nonlocal keypoints_cache
+    def compute(full: bool = not reduced) -> tuple[tuple[Any, ...], dict[str, Any], dict[str, Any], Keypoints,
+                                                   Image.Image]:
+        """Extract on the full image, or else on the preview copy with the keypoints scaled back up."""
         name = method.get()
         current: dict[str, Any] = read_settings(method_values[name], METHOD_PARAMETERS[name], INTEGER_SETTINGS)
         if name == "SIFT":
             current["upsampling"] = int(upsampling.get())
         style = {**read_settings(style_values, style_parameters, INTEGER_SETTINGS), "base": base.get()}
         method_key = (name, *current.items())
-        if keypoints_cache is None or keypoints_cache[0] != method_key:
-            keypoints_cache = (method_key, extract_keypoints(image, name, **current))
-        keypoints = keypoints_cache[1]
-        key = (method_key, view.get(), *style.values())
+        if full not in keypoints_cache or keypoints_cache[full][0] != method_key:
+            found = extract_keypoints(image, name, **current) if full else \
+                extract_keypoints(small, name, **current).scaled(factor)
+            keypoints_cache[full] = (method_key, found)
+        keypoints = keypoints_cache[full][1]
+        key = (full, method_key, view.get(), *style.values())
         if preview is not None and preview[0] == key:  # nothing changed since the preview
             return key, current, style, keypoints, preview[1]
         return key, current, style, keypoints, show_keypoints(image, keypoints, view.get(), **style)
@@ -222,8 +237,12 @@ def ask_keypoints(
         thumbnail.thumbnail(PREVIEW_SIZE, Image.Resampling.LANCZOS)
         photo = ImageTk.PhotoImage(thumbnail, master=dialog)
         canvas.create_image(PREVIEW_SIZE[0] // 2, PREVIEW_SIZE[1] // 2, image=photo)
-        status.configure(text=f"{len(keypoints)} keypoints, each with a descriptor of "
-                              f"{DESCRIPTOR_SIZES[keypoints.method]}. Apply keeps exactly this result.")
+        found = f"{len(keypoints)} keypoints, each with a descriptor of {DESCRIPTOR_SIZES[keypoints.method]}."
+        if reduced:
+            status.configure(text=f"{found} Previewed on a {small.width} × {small.height} copy for speed; "
+                                  f"Apply runs on the full {image.width} × {image.height} image.")
+        else:
+            status.configure(text=f"{found} Apply keeps exactly this result.")
 
     result = []
 
@@ -233,9 +252,14 @@ def ask_keypoints(
         dialog.destroy()
 
     def ok(_event: tk.Event | None = None) -> None:
+        if reduced:
+            status.configure(text=f"Running on the full {image.width} × {image.height} image…")
+            dialog.configure(cursor="watch")
+            dialog.update_idletasks()
         try:
-            _, current, style, keypoints, shown = compute()  # reuses the preview when nothing changed
+            _, current, style, keypoints, shown = compute(full=True)  # reuses the preview when nothing changed
         except ValueError as error:
+            dialog.configure(cursor="")
             messagebox.showerror("Keypoints and descriptors", str(error), parent=dialog)
             return
         result.append((current, view.get(), style, keypoints, shown))
