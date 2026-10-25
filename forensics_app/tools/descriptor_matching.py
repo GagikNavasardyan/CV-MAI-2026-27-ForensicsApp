@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageTk
-from skimage import feature
+from skimage import feature, measure, transform
 
 from forensics_app.core import ImageDocument
 from .base import ForensicsTool, ToolResult
@@ -24,7 +24,14 @@ METRICS = {"ORB": "hamming", "SIFT": "euclidean"}
 CROSS_CHECK = ("On", "Off")
 # max_ratio keeps a match only if its distance is below this fraction of the second-best one; 1 keeps them all.
 # 0.8 is Lowe's value: without it, an image with more keypoints simply gets more matches.
-MATCH_PARAMETERS = {"max_ratio": ("Max distance ratio", 0.8, 0.1, 1.0)}
+# RANSAC keeps the matches that one affine transform (rotation, scale, shear, shift) maps to within the
+# tolerance, in pixels of the second image: those are the matches that agree on where the object is.
+MATCH_PARAMETERS = {
+    "max_ratio": ("Max distance ratio", 0.8, 0.1, 1.0),
+    "tolerance": ("RANSAC tolerance (px)", 5.0, 1.0, 50.0),
+}
+RANSAC = ("Off", "On")
+RANSAC_TRIALS = 1000
 KEYPOINT_COLOUR = (255, 0, 0)
 LINE_COLOURS = ((31, 119, 180), (255, 127, 14), (44, 160, 44), (214, 39, 40), (148, 103, 189),
                 (140, 86, 75), (227, 119, 194), (188, 189, 34), (23, 190, 207))  # matplotlib's tab10, minus grey
@@ -45,6 +52,27 @@ def match_keypoints(first: Keypoints, second: Keypoints, cross_check: bool = Tru
         return np.empty((0, 2), dtype=np.intp)
     return feature.match_descriptors(first.descriptors, second.descriptors, metric=METRICS[first.method],
                                      cross_check=cross_check, max_ratio=max_ratio)
+
+
+def consistent_matches(first: Keypoints, second: Keypoints, matches: np.ndarray, tolerance: float = 5.0) -> np.ndarray:
+    """The matches that agree with one affine transform found by ``skimage.measure.ransac``.
+
+    An affine transform fits any 3 matches exactly, so it only counts when at least one more match agrees;
+    otherwise there are none. The random sampling is seeded, so the same input always gives the same answer.
+    """
+    if len(matches) <= 3:
+        return matches[:0]
+    source = first.points[matches[:, 0], ::-1]  # (x, y), as skimage's transforms expect
+    target = second.points[matches[:, 1], ::-1]
+    _, inliers = measure.ransac((source, target), transform.AffineTransform, min_samples=3,
+                                residual_threshold=tolerance, max_trials=RANSAC_TRIALS, rng=0)
+    return matches[:0] if inliers is None or inliers.sum() <= 3 else matches[inliers]
+
+
+def find_matches(first: Keypoints, second: Keypoints, settings: dict[str, Any]) -> np.ndarray:
+    """The matches for the ``matching_controls`` settings: only the consistent ones when RANSAC is on."""
+    matches = match_keypoints(first, second, settings["cross_check"], settings["max_ratio"])
+    return consistent_matches(first, second, matches, settings["tolerance"]) if settings["ransac"] else matches
 
 
 def show_matches(first_image: Image.Image, second_image: Image.Image, first: Keypoints, second: Keypoints,
@@ -73,11 +101,12 @@ def show_matches(first_image: Image.Image, second_image: Image.Image, first: Key
     return shown
 
 
-def matching_controls(parent: tk.Misc, on_change: Callable[[], None]) -> Callable[[], dict[str, Any]]:
+def matching_controls(parent: tk.Misc, on_change: Callable[[], None],
+                      ransac_default: str = RANSAC[0]) -> Callable[[], dict[str, Any]]:
     """Add the extractor and matching settings to ``parent``; return a function reading them.
 
-    The reader returns the method, its ``extract_keypoints`` parameters, ``cross_check`` and ``max_ratio``,
-    raising ``ValueError`` for bad input.
+    The reader returns the method, its ``extract_keypoints`` parameters, ``cross_check``, ``max_ratio``,
+    ``ransac`` and ``tolerance``, raising ``ValueError`` for bad input.
     """
     method = choice_row(parent, "Extractor", METHODS, on_change)
 
@@ -99,9 +128,11 @@ def matching_controls(parent: tk.Misc, on_change: Callable[[], None]) -> Callabl
 
     ttk.Label(parent, text="Matching", padding=(0, 16, 0, 0)).pack(anchor="w")
     cross_check = choice_row(parent, "Cross check", CROSS_CHECK, on_change)
+    ransac = choice_row(parent, "RANSAC", RANSAC, on_change, default=ransac_default)
     match_values = setting_rows(parent, MATCH_PARAMETERS, on_change, INTEGER_SETTINGS)
     ttk.Label(parent, text="Cross check keeps a match only if each keypoint is the other's best;\n"
-                           "a ratio below 1 also drops matches almost as close as the runner-up.",
+                           "a ratio below 1 also drops matches almost as close as the runner-up;\n"
+                           "RANSAC keeps only the matches that agree on one placement of the object.",
               foreground="#666666").pack(anchor="w", pady=(4, 0))
 
     def reset() -> None:
@@ -110,7 +141,9 @@ def matching_controls(parent: tk.Misc, on_change: Callable[[], None]) -> Callabl
                 method_values[name][setting].set(f"{default:g}")
         upsampling.set("2")
         cross_check.set(CROSS_CHECK[0])
-        match_values["max_ratio"].set(f"{MATCH_PARAMETERS['max_ratio'][1]:g}")
+        ransac.set(ransac_default)
+        for setting, (_, default, _, _) in MATCH_PARAMETERS.items():
+            match_values[setting].set(f"{default:g}")
 
     ttk.Button(parent, text="Reset to defaults", command=reset).pack(anchor="w", pady=(8, 0))
 
@@ -123,6 +156,7 @@ def matching_controls(parent: tk.Misc, on_change: Callable[[], None]) -> Callabl
             "method": name,
             "parameters": parameters,
             "cross_check": cross_check.get() == CROSS_CHECK[0],
+            "ransac": ransac.get() == RANSAC[1],
             **read_settings(match_values, MATCH_PARAMETERS, INTEGER_SETTINGS),
         }
 
@@ -139,15 +173,16 @@ def matching_details(settings: dict[str, Any]) -> dict[str, Any]:
         "Metric": METRICS[settings["method"]],
         "Cross check": "On" if settings["cross_check"] else "Off",
         "Max distance ratio": f"{settings['max_ratio']:g}",
+        "RANSAC (affine)": f"On, tolerance {settings['tolerance']:g} px" if settings["ransac"] else "Off",
     }
 
 
 def ask_matches(
     parent: tk.Misc, image: Image.Image, second_image: Image.Image, second_name: str
-) -> tuple[dict[str, Any], Keypoints, Keypoints, np.ndarray, Image.Image] | None:
+) -> tuple[dict[str, Any], Keypoints, Keypoints, np.ndarray, np.ndarray, Image.Image] | None:
     """Let the user configure the extractor and the matching while previewing; ``None`` if cancelled.
 
-    Returns the settings, the keypoints of each image, the matches and the image to show.
+    Returns the settings, the keypoints of each image, all the matches, those drawn and the image to show.
     """
     dialog = tk.Toplevel(parent)
     dialog.withdraw()  # shown once centred, so it never flashes at the default position
@@ -190,16 +225,19 @@ def ask_matches(
         return keypoints_cache[index, full][1]
 
     def compute(full: bool = not reduced) -> tuple[tuple[Any, ...], dict[str, Any], Keypoints, Keypoints,
-                                                   np.ndarray, Image.Image]:
+                                                   np.ndarray, np.ndarray, Image.Image]:
+        """Also returns all the matches besides those drawn, which are only the consistent ones with RANSAC."""
         settings = read_matching()
         method_key = (settings["method"], *settings["parameters"].items())
         first, second = keypoints_of(0, full, method_key), keypoints_of(1, full, method_key)
         matches = match_keypoints(first, second, settings["cross_check"], settings["max_ratio"])
-        key = (full, method_key, settings["cross_check"], settings["max_ratio"], base.get())
+        drawn = consistent_matches(first, second, matches, settings["tolerance"]) if settings["ransac"] else matches
+        key = (full, method_key, *(settings[name] for name in ("cross_check", "max_ratio", "ransac", "tolerance")),
+               base.get())
         if preview is not None and preview[0] == key:  # nothing changed since the preview
-            return key, settings, first, second, matches, preview[1]
-        return key, settings, first, second, matches, show_matches(image, second_image, first, second, matches,
-                                                                   base.get())
+            return key, settings, first, second, matches, drawn, preview[1]
+        return key, settings, first, second, matches, drawn, show_matches(image, second_image, first, second, drawn,
+                                                                          base.get())
 
     def schedule_preview() -> None:
         nonlocal preview_job
@@ -213,7 +251,7 @@ def ask_matches(
         preview_job = None
         canvas.delete("all")
         try:
-            key, _, first, second, matches, shown = compute()
+            key, settings, first, second, matches, drawn, shown = compute()
         except ValueError as error:
             preview = photo = None
             status.configure(text=str(error))
@@ -223,7 +261,8 @@ def ask_matches(
         thumbnail.thumbnail(PREVIEW_SIZE, Image.Resampling.LANCZOS)
         photo = ImageTk.PhotoImage(thumbnail, master=dialog)
         canvas.create_image(PREVIEW_SIZE[0] // 2, PREVIEW_SIZE[1] // 2, image=photo)
-        found = f"{len(first)} and {len(second)} keypoints, {len(matches)} matches."
+        consistent = f", {len(drawn)} consistent (drawn)" if settings["ransac"] else ""
+        found = f"{len(first)} and {len(second)} keypoints, {len(matches)} matches{consistent}."
         if reduced:
             status.configure(text=f"{found} Previewed on smaller copies for speed; Apply runs on the full images.")
         else:
@@ -282,7 +321,8 @@ class DescriptorMatchingTool(ForensicsTool):
         choice = ask_matches(parent, document.current, second_image, Path(filename).name)
         if choice is None:
             return None
-        settings, first, second, matches, shown = choice
+        settings, first, second, matches, drawn, shown = choice
+        consistent = {"Consistent matches (drawn)": len(drawn)} if settings["ransac"] else {}
         return ToolResult(
             image=shown,
             message=f"Found {len(matches)} {settings['method']} matches.",
@@ -292,5 +332,6 @@ class DescriptorMatchingTool(ForensicsTool):
                 **matching_details(settings),
                 "Keypoints (current, second)": f"{len(first)}, {len(second)}",
                 "Matches": len(matches),
+                **consistent,
             },
         )

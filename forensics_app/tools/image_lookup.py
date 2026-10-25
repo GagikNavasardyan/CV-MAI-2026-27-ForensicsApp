@@ -13,7 +13,7 @@ from PIL import Image
 from forensics_app.core import ImageDocument
 from .base import ForensicsTool, ToolResult
 from .corner_detection import BASES
-from .descriptor_matching import match_keypoints, matching_controls, matching_details, show_matches
+from .descriptor_matching import RANSAC, find_matches, matching_controls, matching_details, show_matches
 from .dialogs import center_over, preview_copy
 from .hog import choice_row
 from .keypoints import Keypoints, extract_keypoints
@@ -30,49 +30,56 @@ def folder_images(folder: Path, exclude: Path | None = None) -> list[Path]:
                   key=lambda path: path.relative_to(folder).as_posix().lower())
 
 
+def compared_keypoints(image: Image.Image, settings: dict[str, Any]) -> tuple[Keypoints, float]:
+    """The keypoints of ``image`` at no more than ``PREVIEW_MAX_SIDE`` px, with the factor back to full size.
+
+    Every image, the reference included, is compared at this size, so a folder of large photos stays quick
+    and the RANSAC tolerance means the same for all of them.
+    """
+    small, factor = preview_copy(image)
+    return extract_keypoints(small, settings["method"], **settings["parameters"]), factor
+
+
 def rank_images(
     reference: Image.Image, paths: list[Path], settings: dict[str, Any],
     progress: Callable[[int, Path], bool] = lambda index, path: True,
-) -> tuple[Keypoints, list[tuple[Path, int]]] | None:
-    """Match ``reference`` against every image in ``paths``; return its keypoints and the images ordered
-    by number of matches, most first (ties keep the folder order).
+) -> list[tuple[Path, int]] | None:
+    """Match ``reference`` against every image in ``paths``; return the images and their number of matches
+    (only the consistent ones with RANSAC), most first (ties keep the folder order).
 
-    Every image, the reference included, is compared at no more than ``PREVIEW_MAX_SIDE`` px, so a folder
-    of large photos stays quick; the reference's keypoints are returned at full scale. ``progress`` is
-    called before each image and stops the search, returning ``None``, when it returns ``False``.
+    ``progress`` is called before each image and stops the search, returning ``None``, when it returns ``False``.
     """
-    method, parameters = settings["method"], settings["parameters"]
-    small, factor = preview_copy(reference)
-    reference_keypoints = extract_keypoints(small, method, **parameters)
+    reference_keypoints, _ = compared_keypoints(reference, settings)
     counts = []
     for index, path in enumerate(paths):
         if not progress(index, path):
             return None
         with Image.open(path) as image_file:
-            image, _ = preview_copy(image_file.copy())
-        matches = match_keypoints(reference_keypoints, extract_keypoints(image, method, **parameters),
-                                  settings["cross_check"], settings["max_ratio"])
-        counts.append((path, len(matches)))
-    return reference_keypoints.scaled(factor), sorted(counts, key=lambda item: -item[1])
+            keypoints, _ = compared_keypoints(image_file.copy(), settings)
+        counts.append((path, len(find_matches(reference_keypoints, keypoints, settings))))
+    return sorted(counts, key=lambda item: -item[1])
 
 
-def best_match_image(reference: Image.Image, reference_keypoints: Keypoints, path: Path, settings: dict[str, Any],
-                     base: str = BASES[0]) -> tuple[Image.Image, Keypoints, np.ndarray]:
-    """The reference and the image at ``path`` side by side with their matches, as ``rank_images`` found them."""
+def best_match_image(reference: Image.Image, path: Path, settings: dict[str, Any],
+                     base: str = BASES[0]) -> tuple[Image.Image, Keypoints, Keypoints, np.ndarray]:
+    """The reference and the image at ``path`` side by side with their matches, as ``rank_images`` found them,
+    and the keypoints of each at full scale."""
     with Image.open(path) as image_file:
         image = image_file.copy()
-    small, factor = preview_copy(image)
-    keypoints = extract_keypoints(small, settings["method"], **settings["parameters"]).scaled(factor)
-    matches = match_keypoints(reference_keypoints, keypoints, settings["cross_check"], settings["max_ratio"])
-    return show_matches(reference, image, reference_keypoints, keypoints, matches, base), keypoints, matches
+    (reference_keypoints, reference_factor), (keypoints, factor) = (compared_keypoints(reference, settings),
+                                                                    compared_keypoints(image, settings))
+    matches = find_matches(reference_keypoints, keypoints, settings)
+    reference_keypoints, keypoints = reference_keypoints.scaled(reference_factor), keypoints.scaled(factor)
+    shown = show_matches(reference, image, reference_keypoints, keypoints, matches, base)
+    return shown, reference_keypoints, keypoints, matches
 
 
 def ask_lookup(
     parent: tk.Misc, image: Image.Image, folder: Path, paths: list[Path]
-) -> tuple[dict[str, Any], str, Keypoints, list[tuple[Path, int]]] | None:
+) -> tuple[dict[str, Any], str, list[tuple[Path, int]]] | None:
     """Let the user configure the extractor and the matching, then search the folder; ``None`` if cancelled.
 
-    Returns the settings, the base to draw on, the reference keypoints and the ranking.
+    Returns the settings, the base to draw on and the ranking.
     """
     dialog = tk.Toplevel(parent)
     dialog.withdraw()  # shown once centred, so it never flashes at the default position
@@ -84,11 +91,11 @@ def ask_lookup(
 
     ttk.Label(body, text=f"Compare the current image with the {len(paths)} images in “{folder.name}” "
                          f"and its subfolders.").pack(anchor="w")
-    read_matching = matching_controls(body, lambda: None)
+    read_matching = matching_controls(body, lambda: None, ransac_default=RANSAC[1])
     base = choice_row(body, "Draw on", BASES, lambda: None)
     status = ttk.Label(body, foreground="#666666", wraplength=420,
-                       text="The image with the most matches wins. Large images are compared on smaller "
-                            "copies for speed.")
+                       text="The image with the most matches wins; with RANSAC on, only the consistent "
+                            "matches count. Large images are compared on smaller copies for speed.")
     status.pack(anchor="w", pady=(12, 0))
 
     result = []
@@ -129,7 +136,7 @@ def ask_lookup(
                 messagebox.showerror("Closest image in a folder", str(error), parent=dialog)
             return
         if found is not None and not stopped:
-            result.append((settings, base.get(), *found))
+            result.append((settings, base.get(), found))
             close()
 
     buttons = ttk.Frame(body)
@@ -152,7 +159,7 @@ class ImageLookupTool(ForensicsTool):
     tool_id = "image_lookup"
     title = "Closest image in a folder"
     category = "Feature extraction"
-    description = "Find the image of a folder with the most ORB or SIFT matches."
+    description = "Find the image of a folder with the most ORB or SIFT matches, optionally checked with RANSAC."
     works_on_histogram = False
 
     def run(self, parent: tk.Misc, document: ImageDocument) -> ToolResult | None:
@@ -167,13 +174,14 @@ class ImageLookupTool(ForensicsTool):
         choice = ask_lookup(parent, document.current, folder, paths)
         if choice is None:
             return None
-        settings, base, reference_keypoints, ranking = choice
+        settings, base, ranking = choice
         best, best_count = ranking[0]
-        shown, keypoints, matches = best_match_image(document.current, reference_keypoints, best, settings, base)
+        shown, reference_keypoints, keypoints, matches = best_match_image(document.current, best, settings, base)
         names = {path: path.relative_to(folder).as_posix() for path, _ in ranking}
+        counted = "consistent matches" if settings["ransac"] else "matches"
         return ToolResult(
             image=shown,
-            message=f"Closest image: {names[best]} ({best_count} matches).",
+            message=f"Closest image: {names[best]} ({best_count} {counted}).",
             details={
                 "Operation": "Closest image in a folder",
                 "Folder": str(folder),
@@ -181,7 +189,7 @@ class ImageLookupTool(ForensicsTool):
                 **matching_details(settings),
                 "Closest image": names[best],
                 "Keypoints (current, closest)": f"{len(reference_keypoints)}, {len(keypoints)}",
-                "Matches": len(matches),
-                **{f"{place}. {names[path]}": f"{count} matches" for place, (path, count) in enumerate(ranking, 1)},
+                counted.capitalize(): len(matches),
+                **{f"{place}. {names[path]}": f"{count} {counted}" for place, (path, count) in enumerate(ranking, 1)},
             },
         )
