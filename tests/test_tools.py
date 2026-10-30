@@ -1,3 +1,5 @@
+from pathlib import Path
+import tempfile
 import unittest
 
 import numpy as np
@@ -15,6 +17,7 @@ from forensics_app.tools.convolution import (
 )
 from forensics_app.tools.corner_detection import VIEWS as CORNER_VIEWS, corner_response, find_corners, show_corners
 from forensics_app.tools.dialogs import preview_copy
+from forensics_app.tools.eigenfaces import build_model, load_faces, load_model, save_model, show_eigenfaces
 from forensics_app.tools.face_detection import Face, draw_faces
 from forensics_app.tools.edge_detection import VIEWS, detect_edges, show_edges
 from forensics_app.tools.grayscale import GrayscaleTool
@@ -250,6 +253,36 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(result.getpixel((40, 55)), (0, 0, 255))  # the nose
         self.assertEqual(draw_faces(image, [face], landmarks=False).getpixel((40, 55)), (128, 128, 128))
         self.assertEqual(image.mode, "L")  # the input is untouched
+
+    def test_eigenfaces_build_save_and_load(self) -> None:
+        rng = np.random.default_rng(0)
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for person in ("Ada_Lovelace", "Alan_Turing"):
+                (root / "train" / person).mkdir(parents=True)
+                for index in range(4):
+                    Image.fromarray(rng.integers(0, 256, (10, 8), dtype=np.uint8)).save(
+                        root / "train" / person / f"{index}.png")
+            faces = load_faces(root)
+            self.assertEqual(faces.images.shape, (8, 10, 8))
+            self.assertEqual(faces.names[0], "Ada Lovelace")
+            self.assertEqual(faces.paths[0], "train/Ada_Lovelace/0.png")
+            model = build_model(faces, 7)  # 8 centred faces span at most 7 directions
+            u = model.eigenfaces.reshape(7, -1)
+            np.testing.assert_allclose(u @ u.T, np.eye(7), atol=1e-10)  # orthonormal
+            np.testing.assert_allclose(model.project(faces.images), model.coefficients)
+            np.testing.assert_allclose(model.mean + np.tensordot(model.coefficients[0], model.eigenfaces, 1),
+                                       faces.images[0], atol=1e-8)  # all components rebuild the face exactly
+            self.assertAlmostEqual(model.explained_variance_ratio.sum(), 1.0)
+            with self.assertRaises(ValueError):
+                build_model(faces, 8)
+            save_model(model, root)
+            loaded = load_model(root)
+            np.testing.assert_allclose(loaded.coefficients, model.coefficients)
+            self.assertEqual((loaded.names, loaded.paths), (model.names, model.paths))
+            self.assertEqual(show_eigenfaces(model, 6).mode, "RGB")
+        with self.assertRaises(ValueError):
+            load_faces(Path(folder))  # gone, so there are no faces
 
     def test_person_detection_finds_the_template_in_a_flat_scene(self) -> None:
         template = Image.new("RGB", (16, 32), (60, 60, 60))

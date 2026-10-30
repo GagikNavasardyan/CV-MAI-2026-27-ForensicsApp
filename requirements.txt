@@ -4,3 +4,4 @@ scikit-image>=0.25,<1
 scipy>=1.11
 matplotlib>=3.7
 opencv-python>=4.8
+scikit-learn>=1.3
