@@ -15,6 +15,7 @@ from forensics_app.tools.convolution import (
 )
 from forensics_app.tools.corner_detection import VIEWS as CORNER_VIEWS, corner_response, find_corners, show_corners
 from forensics_app.tools.dialogs import preview_copy
+from forensics_app.tools.face_detection import Face, draw_faces
 from forensics_app.tools.edge_detection import VIEWS, detect_edges, show_edges
 from forensics_app.tools.grayscale import GrayscaleTool
 from forensics_app.tools.histogram import histogram_image
@@ -239,6 +240,16 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(show_hog(image, hog_image, "Side by side").size, (4, 1))
         for view in HOG_VIEWS:
             self.assertEqual(show_hog(image, hog_image, view).height, 1, view)
+
+    def test_draw_faces_marks_box_and_landmarks(self) -> None:
+        image = Image.new("L", (100, 100), 128)
+        face = Face((20, 30, 40, 50), ((30.0, 45.0), (50.0, 45.0), (40.0, 55.0), (32.0, 65.0), (48.0, 65.0)), 0.9)
+        result = draw_faces(image, [face])
+        self.assertEqual(result.mode, "RGB")
+        self.assertEqual(result.getpixel((20, 55)), (0, 255, 0))  # left edge of the box
+        self.assertEqual(result.getpixel((40, 55)), (0, 0, 255))  # the nose
+        self.assertEqual(draw_faces(image, [face], landmarks=False).getpixel((40, 55)), (128, 128, 128))
+        self.assertEqual(image.mode, "L")  # the input is untouched
 
     def test_person_detection_finds_the_template_in_a_flat_scene(self) -> None:
         template = Image.new("RGB", (16, 32), (60, 60, 60))
