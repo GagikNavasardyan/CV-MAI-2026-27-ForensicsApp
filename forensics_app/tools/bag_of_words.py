@@ -44,7 +44,13 @@ TILE_HEIGHT = 120
 WORD_TILE = 64
 GAP = 12
 MARKER = (255, 0, 0)
-PREVIEW_SIZE = (720, 380)
+# How many keypoints the pictures draw per image, for the slide's look; the counting always uses all of them.
+DRAWN = ("Keypoints drawn", 60, 1, 2000)
+ROW_HEIGHT = 4.2  # inches per image in the 7.2 figure
+OPENED, PER_CLASS = VIEWS = ("Opened image", "One test image per class")
+GREY, WORD_COLOUR = LINE_COLOURS = ("Grey", "Word colour")  # the slide's grey, or each keypoint's word colour
+EXAMPLE = ("Test image", 1, 1, 30)  # which test image of each class; past the last it wraps round
+PREVIEW_SIZE = (760, 460)  # tall enough for the three stacked rows
 PREVIEW_DELAY_MS = 300
 
 
@@ -206,14 +212,6 @@ def load_vocabulary(folder: Path) -> Vocabulary:
                       np.load(source / "train_histograms.npy"), pairs(description["test"]))
 
 
-def describe(image: Image.Image, vocabulary: Vocabulary) -> tuple[Image.Image, Keypoints, np.ndarray, np.ndarray]:
-    """7.2 for one image: its keypoints, the visual word of each one and its normalized histogram."""
-    grey = prepared(image)
-    keypoints = extract_keypoints(grey, vocabulary.method, **vocabulary.parameters)
-    words = assign_words(keypoints.descriptors, vocabulary.centroids)
-    return grey, keypoints, words, word_histogram(words, vocabulary.words)
-
-
 def _titled(images: list[Image.Image], titles: list[str], columns: int, font: ImageFont.ImageFont,
             heading: str) -> Image.Image:
     """``images`` (already at their tile size) in rows of ``columns``, each titled above, under ``heading``."""
@@ -237,20 +235,29 @@ def _titled(images: list[Image.Image], titles: list[str], columns: int, font: Im
     return result
 
 
-def show_vocabulary(vocabulary: Vocabulary, examples: list[Example]) -> Image.Image:
-    """Training images with their keypoints in red, and below, every visual word as the patch closest to it."""
+def drawn_subset(count: int, drawn: int) -> np.ndarray:
+    """Which of ``count`` keypoints to draw: all of them, or ``drawn`` picked at random (fixed seed) so the
+    picture stays readable. Only the drawing uses this; the vocabulary and the histograms use every keypoint."""
+    if count <= drawn:
+        return np.arange(count)
+    return np.sort(np.random.default_rng(0).choice(count, size=drawn, replace=False))
+
+
+def show_vocabulary(vocabulary: Vocabulary, examples: list[Example], drawn: int = DRAWN[1]) -> Image.Image:
+    """Training images with (up to ``drawn`` of) their keypoints in red, and below, every visual word as the
+    patch closest to it."""
     font = ImageFont.load_default(14)
     tiles = []
     for example in examples:
         marked = example.grey.convert("RGB")
         draw = ImageDraw.Draw(marked)
-        radius = max(2, round(max(marked.size) / 120))
-        for row, col in example.keypoints.points:
+        radius = max(2, round(max(marked.size) / 100))
+        for row, col in example.keypoints.points[drawn_subset(len(example.keypoints), drawn)]:
             draw.ellipse((col - radius, row - radius, col + radius, row + radius), fill=MARKER)
         tiles.append(marked.resize((max(1, round(marked.width * TILE_HEIGHT / marked.height)), TILE_HEIGHT),
                                    Image.Resampling.LANCZOS))
-    keypoints = _titled(tiles, [f"{len(example.keypoints)} keypoints" for example in examples], COLUMNS, font,
-                        f"Training images with their {vocabulary.method} keypoints")
+    titles = [f"{min(drawn, len(example.keypoints))} of {len(example.keypoints)} keypoints" for example in examples]
+    keypoints = _titled(tiles, titles, COLUMNS, font, f"Training images with their {vocabulary.method} keypoints")
     words = [Image.fromarray(patch).resize((WORD_TILE, WORD_TILE), Image.Resampling.NEAREST)
              for patch in vocabulary.patches]
     columns = max(COLUMNS, int(np.ceil(np.sqrt(vocabulary.words))))
@@ -263,58 +270,97 @@ def show_vocabulary(vocabulary: Vocabulary, examples: list[Example]) -> Image.Im
     return result
 
 
-def show_histogram(grey: Image.Image, keypoints: Keypoints, words: np.ndarray, histogram: np.ndarray,
-                   vocabulary: Vocabulary, title: str) -> Image.Image:
-    """The image with each keypoint coloured by its visual word and a line to that word's bar, as on the slide."""
+@dataclass(frozen=True)
+class Described:
+    """An image as 7.2 sees it: its keypoints, the visual word of each one and the normalized histogram."""
+
+    title: str
+    grey: Image.Image
+    keypoints: Keypoints
+    words: np.ndarray
+    histogram: np.ndarray
+
+
+def describe(image: Image.Image, vocabulary: Vocabulary, title: str = "image") -> Described:
+    """7.2 for one image: assign each descriptor to its closest visual word and count them."""
+    grey = prepared(image)
+    keypoints = extract_keypoints(grey, vocabulary.method, **vocabulary.parameters)
+    words = assign_words(keypoints.descriptors, vocabulary.centroids)
+    return Described(title, grey, keypoints, words, word_histogram(words, vocabulary.words))
+
+
+def show_histograms(rows: list[Described], vocabulary: Vocabulary, drawn: int = DRAWN[1],
+                    lines_colour: str = GREY) -> Image.Image:
+    """One row per image, as on the slide: the image with (up to ``drawn`` of) its keypoints coloured by visual
+    word and a line from each to its word's bar, grey as on the slide or in the word's colour to follow each one.
+    The histogram always counts every keypoint."""
     count = vocabulary.words
     colours = colormaps["hsv"](np.linspace(0, 1, count, endpoint=False))
-    figure = Figure(figsize=(12, 4.5), dpi=100)
-    grid = figure.add_gridspec(2, 2, width_ratios=(1, 1.6), height_ratios=(1, 0.12), hspace=0.05, wspace=0.2,
-                               left=0.02, right=0.98, top=0.9, bottom=0.13)
-    picture = figure.add_subplot(grid[:, 0])
-    bars = figure.add_subplot(grid[0, 1])
-    strip = figure.add_subplot(grid[1, 1], sharex=bars)
+    height = ROW_HEIGHT * len(rows)
+    figure = Figure(figsize=(12, height), dpi=100)
+    outer = figure.add_gridspec(len(rows), 1, hspace=0.35, left=0.02, right=0.98, top=1 - 0.4 / height,
+                                bottom=0.55 / height)
+    lines = []
+    for place, row in enumerate(rows):
+        grid = outer[place].subgridspec(2, 2, width_ratios=(1, 1.6), height_ratios=(1, 0.12), hspace=0.05,
+                                        wspace=0.2)
+        picture = figure.add_subplot(grid[:, 0])
+        bars = figure.add_subplot(grid[0, 1])
+        strip = figure.add_subplot(grid[1, 1], sharex=bars)
+        shown = drawn_subset(len(row.keypoints), drawn)
 
-    picture.imshow(grey, cmap="gray", vmin=0, vmax=255)
-    if len(keypoints):
-        picture.scatter(keypoints.points[:, 1], keypoints.points[:, 0], s=14, c=colours[words], edgecolors="black",
-                        linewidths=0.4, zorder=3)
-    picture.set_title(title)
-    picture.set_axis_off()
+        picture.imshow(row.grey, cmap="gray", vmin=0, vmax=255)
+        if len(shown):
+            picture.scatter(row.keypoints.points[shown, 1], row.keypoints.points[shown, 0], s=22,
+                            c=colours[row.words[shown]], edgecolors="black", linewidths=0.5, zorder=3)
+        picture.set_title(f"{row.title} ({len(shown)} of {len(row.keypoints)} keypoints drawn)", fontsize=10)
+        picture.set_axis_off()
 
-    positions = np.arange(count)
-    bars.bar(positions, histogram, width=0.8, color="#d0d0d0", edgecolor="black", linewidth=0.6)
-    bars.set_title("Histogram of visual words")
-    bars.set_ylabel("Normalized frequency")
-    bars.set_xlim(-0.6, count - 0.4)
-    bars.set_ylim(0, max(float(histogram.max()) * 1.1, 0.01))
-    bars.tick_params(labelbottom=False)
-    # Under each bar, the patch that pictures its word.
-    strip.imshow(np.hstack(list(vocabulary.patches)), cmap="gray", vmin=0, vmax=255, aspect="auto",
-                 extent=(-0.5, count - 0.5, 1, 0))
-    strip.set_yticks([])
-    strip.set_xlabel("Visual word index")
+        bars.bar(np.arange(count), row.histogram, width=0.8, color="#d0d0d0", edgecolor="black", linewidth=0.6)
+        bars.set_title("Histogram of visual words", fontsize=10)
+        bars.set_ylabel("Normalized frequency")
+        bars.set_xlim(-0.6, count - 0.4)
+        bars.set_ylim(0, max(float(row.histogram.max()) * 1.1, 0.01))
+        bars.tick_params(labelbottom=False)
+        # Under each bar, the patch that pictures its word.
+        strip.imshow(np.hstack(list(vocabulary.patches)), cmap="gray", vmin=0, vmax=255, aspect="auto",
+                     extent=(-0.5, count - 0.5, 1, 0))
+        strip.set_yticks([])
+        strip.set_xlabel("Visual word index")
+        for axes in (picture, bars):
+            axes.set_facecolor("none")  # see-through, so the lines drawn under the axes show
+        if len(shown):
+            words = row.words[shown]
+            lines.append((picture, row.keypoints.points[shown][:, ::-1], bars,
+                          np.column_stack((words, row.histogram[words])), words))
 
     canvas = FigureCanvasAgg(figure)
     canvas.draw()
-    if len(keypoints):
-        # Lines from each keypoint to the top of its word's bar, drawn in figure coordinates over both axes.
-        to_figure = figure.transFigure.inverted()
-        starts = to_figure.transform(picture.transData.transform(keypoints.points[:, ::-1]))
-        ends = to_figure.transform(bars.transData.transform(np.column_stack((words, histogram[words]))))
-        # Under the axes (made see-through), so the bars and labels stay on top as on the slide.
-        for axes in (picture, bars):
-            axes.set_facecolor("none")
-        figure.add_artist(LineCollection(np.stack((starts, ends), axis=1), colors=colours[words], alpha=0.2,
-                                         linewidths=0.5, transform=figure.transFigure, zorder=-1))
+    # From each drawn keypoint to the top of its word's bar, in figure coordinates across both axes. They go under
+    # the axes, so the bars and labels stay on top as on the slide.
+    to_figure = figure.transFigure.inverted()
+    for picture, starts, bars, ends, words in lines:
+        segments = np.stack((to_figure.transform(picture.transData.transform(starts)),
+                             to_figure.transform(bars.transData.transform(ends))), axis=1)
+        grey = lines_colour == GREY
+        figure.add_artist(LineCollection(segments, colors="#7f7f7f" if grey else colours[words],
+                                         alpha=0.5 if grey else 0.8, linewidths=0.6 if grey else 0.8,
+                                         transform=figure.transFigure, zorder=-1))
+    if lines:
         canvas.draw()
     return Image.fromarray(np.asarray(canvas.buffer_rgba())).convert("RGB")
 
 
-def histogram_result(image: Image.Image, path: Path | None, folder: Path,
-                     vocabulary: Vocabulary) -> tuple[Image.Image, str, dict[str, object]]:
-    """The 7.2 panel of ``image``, a one-line summary and the details; warns when it is a training image."""
-    grey, keypoints, words, histogram = describe(image, vocabulary)
+def _summary(row: Described, vocabulary: Vocabulary) -> str:
+    top = np.argsort(row.histogram, kind="stable")[::-1][:3]
+    words = ", ".join(f"vw {word} ({row.histogram[word]:.2f})" for word in top if row.histogram[word])
+    return f"{len(row.keypoints)} keypoints in {np.count_nonzero(row.histogram)} of {vocabulary.words} words" + \
+        (f"; most frequent {words}" if words else "")
+
+
+def histogram_result(image: Image.Image, path: Path | None, folder: Path, vocabulary: Vocabulary,
+                     drawn: int = DRAWN[1], lines_colour: str = GREY) -> tuple[Image.Image, str, dict[str, object]]:
+    """The 7.2 panel of the opened image, a one-line summary and the details; warns when it is a training image."""
     relative = None
     if path is not None:
         try:
@@ -323,21 +369,46 @@ def histogram_result(image: Image.Image, path: Path | None, folder: Path,
             pass
     split = "training" if relative in {train for train, _ in vocabulary.train} else \
         "test" if relative in {test for test, _ in vocabulary.test} else None
-    label = path.parent.name if split else (path.name if path else "image")
-    panel = show_histogram(grey, keypoints, words, histogram, vocabulary, label)
-    top = np.argsort(histogram, kind="stable")[::-1][:3]
+    title = path.parent.name if split else (path.name if path else "image")
+    row = describe(image, vocabulary, title)
     note = "" if split != "training" else " This is a training image: the slide shows test images."
-    return panel, f"{len(keypoints)} keypoints in {np.count_nonzero(histogram)} of {vocabulary.words} words.{note}", {
-        "Image split": f"{split} ({label})" if split else "Not in the dataset",
-        "Size described": f"{grey.width} × {grey.height} px (greyscale, longest side ≤ {MAX_SIDE})",
-        "Keypoints": len(keypoints),
-        "Words used": f"{np.count_nonzero(histogram)} of {vocabulary.words}",
-        "Most frequent words": ", ".join(f"vw {word} ({histogram[word]:.2f})" for word in top if histogram[word]),
+    summary = f"{len(row.keypoints)} keypoints in {np.count_nonzero(row.histogram)} of {vocabulary.words} words.{note}"
+    return show_histograms([row], vocabulary, drawn, lines_colour), summary, {
+        "Image split": f"{split} ({title})" if split else "Not in the dataset",
+        "Size described": f"{row.grey.width} × {row.grey.height} px (greyscale, longest side ≤ {MAX_SIDE})",
+        "Histogram": _summary(row, vocabulary),
     }
 
 
-def ask_vocabulary(parent: tk.Misc) -> tuple[Path, Vocabulary, list[Example]] | None:
-    """Let the user pick the dataset, extractor and K, then build the vocabulary; ``None`` if cancelled."""
+def class_examples(vocabulary: Vocabulary, example: int = 1) -> list[tuple[str, str]]:
+    """The ``example``-th test image (from 1, wrapping round) of each class, in class order."""
+    chosen = []
+    for label in vocabulary.classes:
+        paths = [path for path, test_label in vocabulary.test if test_label == label]
+        if not paths:
+            raise ValueError(f"No test image of {label}.")
+        chosen.append((paths[(example - 1) % len(paths)], label))
+    return chosen
+
+
+def class_examples_result(folder: Path, vocabulary: Vocabulary, example: int = 1, drawn: int = DRAWN[1],
+                          lines_colour: str = GREY) -> tuple[Image.Image, str, dict[str, object]]:
+    """7.2 for one test image of each class, stacked as on the slide: the panel, a summary and the details."""
+    chosen = class_examples(vocabulary, example)
+    rows = []
+    for path, label in chosen:
+        with Image.open(folder / path) as image_file:
+            rows.append(describe(image_file, vocabulary, label))
+    return show_histograms(rows, vocabulary, drawn, lines_colour), f"Test image {example} of each of {len(rows)} classes.", {
+        f"{row.title} ({path})": _summary(row, vocabulary) for row, (path, _) in zip(rows, chosen)
+    }
+
+
+def ask_vocabulary(parent: tk.Misc) -> tuple[Path, Vocabulary, list[Example], int] | None:
+    """Let the user pick the dataset, extractor and K, then build the vocabulary; ``None`` if cancelled.
+
+    Returns the dataset folder, the vocabulary, the training images to show and how many keypoints to draw.
+    """
     dialog = tk.Toplevel(parent)
     dialog.withdraw()  # shown once centred, so it never flashes at the default position
     dialog.title("Visual vocabulary")
@@ -376,6 +447,10 @@ def ask_vocabulary(parent: tk.Misc) -> tuple[Path, Vocabulary, list[Example]] | 
                          f"{WORDS_PER_CLASS} × the number of classes.\nImages are read in greyscale with the longest "
                          f"side at most {MAX_SIDE} px, and split 75/25 per class (seed 42).",
               foreground="#666666", justify="left").pack(anchor="w", pady=(6, 0))
+    ttk.Label(body, text="Picture", padding=(0, 12, 0, 0)).pack(anchor="w")
+    drawn = number_row(body, *DRAWN, lambda: None)
+    ttk.Label(body, text="Only the training images shown are drawn with fewer keypoints; K-Means uses all of them.",
+              foreground="#666666").pack(anchor="w", pady=(6, 0))
     status = ttk.Label(body, foreground="#666666", wraplength=520)
     status.pack(anchor="w", pady=(12, 0))
 
@@ -425,6 +500,7 @@ def ask_vocabulary(parent: tk.Misc) -> tuple[Path, Vocabulary, list[Example]] | 
             if name == "SIFT":
                 parameters["upsampling"] = int(upsampling.get())
             k = read_number(words, WORDS[0], WORDS[2], WORDS[3])
+            shown = read_number(drawn, DRAWN[0], DRAWN[2], DRAWN[3])
         except (ValueError, OSError) as error:
             messagebox.showerror("Visual vocabulary", str(error), parent=dialog)
             return
@@ -461,7 +537,7 @@ def ask_vocabulary(parent: tk.Misc) -> tuple[Path, Vocabulary, list[Example]] | 
             if "error" in outcome:
                 status.configure(text=f"Could not build the vocabulary: {outcome['error']}")
                 return
-            result.append((chosen, *outcome["built"]))
+            result.append((chosen, *outcome["built"], shown))
             close()
 
         poll()
@@ -486,8 +562,21 @@ def ask_vocabulary(parent: tk.Misc) -> tuple[Path, Vocabulary, list[Example]] | 
     return result[0] if result else None
 
 
-def ask_histogram(parent: tk.Misc, image: Image.Image, path: Path | None) -> tuple[Path, Vocabulary] | None:
-    """Let the user pick the dataset with a saved vocabulary while previewing the histogram; ``None`` if cancelled."""
+def histogram_view(folder: Path, vocabulary: Vocabulary, view: str, image: Image.Image, path: Path | None,
+                   example: int, drawn: int, lines_colour: str = GREY) -> tuple[Image.Image, str, dict[str, object]]:
+    """The panel, summary and details of the chosen 7.2 view."""
+    if view == PER_CLASS:
+        return class_examples_result(folder, vocabulary, example, drawn, lines_colour)
+    return histogram_result(image, path, folder, vocabulary, drawn, lines_colour)
+
+
+def ask_histogram(parent: tk.Misc, image: Image.Image,
+                  path: Path | None) -> tuple[Path, Vocabulary, str, int, int, str] | None:
+    """Let the user pick the dataset with a saved vocabulary and the view while previewing; ``None`` if cancelled.
+
+    Returns the dataset folder, the vocabulary, the view, which test image of each class, how many keypoints to
+    draw and the colour of the lines.
+    """
     dialog = tk.Toplevel(parent)
     dialog.withdraw()  # shown once centred, so it never flashes at the default position
     dialog.title("Histogram of visual words")
@@ -504,8 +593,15 @@ def ask_histogram(parent: tk.Misc, image: Image.Image, path: Path | None) -> tup
     folder = tk.StringVar(dialog, value=str(default))
     ttk.Entry(folder_row, textvariable=folder).pack(side="left", fill="x", expand=True)
     ttk.Button(folder_row, text="Browse…", command=lambda: browse()).pack(side="left", padx=(6, 0))
-    ttk.Label(body, text="Each descriptor is assigned to its closest visual word; the histogram counts them and is "
-                         "normalized to sum 1.", foreground="#666666").pack(anchor="w", pady=(6, 0))
+    view = choice_row(body, "Show", VIEWS, lambda: view_changed())
+    example = number_row(body, *EXAMPLE, lambda: schedule_preview())
+    example_row = body.winfo_children()[-1]
+    drawn = number_row(body, *DRAWN, lambda: schedule_preview())
+    lines_colour = choice_row(body, "Lines", LINE_COLOURS, lambda: schedule_preview())
+    hint =ttk.Label(body, text="Each descriptor is assigned to its closest visual word; the histogram counts all of "
+                                "them and is normalized to sum 1.\nOnly the drawing uses fewer keypoints, picked at "
+                                "random with a fixed seed.", foreground="#666666", justify="left")
+    hint.pack(anchor="w", pady=(6, 0))
 
     canvas = tk.Canvas(body, width=PREVIEW_SIZE[0], height=PREVIEW_SIZE[1], background="#20242b", highlightthickness=0)
     canvas.pack(pady=(12, 2))
@@ -516,12 +612,24 @@ def ask_histogram(parent: tk.Misc, image: Image.Image, path: Path | None) -> tup
     cache: tuple[Path, Vocabulary] | None = None
     photo: ImageTk.PhotoImage | None = None
 
-    def compute() -> tuple[Path, Vocabulary]:
+    def compute() -> tuple[Path, Vocabulary, str, int, int, str]:
         nonlocal cache
         chosen = Path(folder.get()).expanduser()
         if cache is None or cache[0] != chosen:
             cache = (chosen, load_vocabulary(chosen))
-        return cache
+        number = read_number(example, EXAMPLE[0], EXAMPLE[2], EXAMPLE[3]) if view.get() == PER_CLASS else EXAMPLE[1]
+        return (chosen, cache[1], view.get(), number, read_number(drawn, DRAWN[0], DRAWN[2], DRAWN[3]),
+                lines_colour.get())
+
+    def view_changed() -> None:
+        if view.get() == PER_CLASS:
+            example_row.pack(fill="x", pady=(6, 0), before=drawn_row)
+        else:
+            example_row.pack_forget()
+        schedule_preview()
+
+    drawn_row = body.winfo_children()[body.winfo_children().index(example_row) + 1]
+    example_row.pack_forget()  # the opened image is the first view
 
     def schedule_preview(*_: object) -> None:
         nonlocal preview_job
@@ -535,8 +643,8 @@ def ask_histogram(parent: tk.Misc, image: Image.Image, path: Path | None) -> tup
         preview_job = None
         canvas.delete("all")
         try:
-            chosen, vocabulary = compute()
-            panel, summary, _ = histogram_result(image, path, chosen, vocabulary)
+            chosen, vocabulary, selected, number, shown, colour = compute()
+            panel, summary, _ = histogram_view(chosen, vocabulary, selected, image, path, number, shown, colour)
         except (ValueError, OSError) as error:
             status.configure(text=str(error))
             return
@@ -594,10 +702,10 @@ class VisualVocabularyTool(ForensicsTool):
         choice = ask_vocabulary(parent)
         if choice is None:
             return None
-        folder, vocabulary, examples = choice
+        folder, vocabulary, examples, drawn = choice
         target = save_vocabulary(vocabulary, folder)
         gallery = target / "vocabulary.png"  # opened as the document, so it shows even with no image loaded
-        show_vocabulary(vocabulary, examples).save(gallery)
+        show_vocabulary(vocabulary, examples, drawn).save(gallery)
         return ToolResult(
             message=f"Built {vocabulary.words} visual words and saved them to {target}.",
             details={
@@ -611,6 +719,7 @@ class VisualVocabularyTool(ForensicsTool):
                 **({"Upsampling": vocabulary.parameters["upsampling"]} if vocabulary.method == "SIFT" else {}),
                 "Descriptor": DESCRIPTOR_SIZES[vocabulary.method],
                 "Visual words (K)": vocabulary.words,
+                "Keypoints drawn": f"Up to {drawn} per training image shown",
                 "Model saved to": str(target),
                 "Files": "centroids.npy, word_patches.npy, train_histograms.npy, vocabulary.json",
             },
@@ -631,16 +740,19 @@ class WordHistogramTool(ForensicsTool):
         choice = ask_histogram(parent, document.original, document.path)
         if choice is None:
             return None
-        folder, vocabulary = choice
-        panel, summary, details = histogram_result(document.original, document.path, folder, vocabulary)
+        folder, vocabulary, view, example, drawn, lines_colour = choice
+        panel, summary, details = histogram_view(folder, vocabulary, view, document.original, document.path,
+                                                 example, drawn, lines_colour)
         return ToolResult(
             image=panel,
             message=summary,
             details={
-                "Operation": "Histogram of visual words",
+                "Operation": f"Histogram of visual words: {view.lower()}",
                 "Vocabulary": str(folder / VOCABULARY_FOLDER),
                 "Extractor": vocabulary.method,
                 "Visual words (K)": vocabulary.words,
+                "Keypoints drawn": f"Up to {drawn} per image (the histogram counts all)",
+                "Lines": lines_colour,
                 **details,
             },
         )
