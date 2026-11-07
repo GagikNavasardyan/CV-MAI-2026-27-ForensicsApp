@@ -1,6 +1,7 @@
 """Register course functionality here so it appears in the sidebar."""
 
 from .bag_of_words import VisualVocabularyTool, WordHistogramTool
+from .bow_classification import ClassificationTool
 from .contrast_stretching import ContrastStretchingTool
 from .convolution import ConvolutionTool
 from .corner_detection import CornerDetectionTool
@@ -51,6 +52,7 @@ def build_tool_registry() -> ToolRegistry:
             FaceRecognitionTool(),
             VisualVocabularyTool(),
             WordHistogramTool(),
+            ClassificationTool(),
         ]
     )
 

@@ -7,6 +7,33 @@ from PIL import Image
 from scipy import ndimage
 
 from forensics_app.core import ImageDocument
+from forensics_app.tools.bag_of_words import (
+    assign_words,
+    build_vocabulary,
+    describe,
+    load_vocabulary,
+    save_vocabulary,
+    show_histograms,
+    show_vocabulary,
+    word_histogram,
+)
+from forensics_app.tools.bow_classification import (
+    CHI2,
+    CLASSIFIERS,
+    FOREST,
+    KERNELS,
+    LOGISTIC,
+    RBF,
+    SVM,
+    chi2_distances,
+    classification_result,
+    classify,
+    describe_parameters,
+    intersection_kernel,
+    resolved_gamma,
+    train_classifier,
+    true_class,
+)
 from forensics_app.tools.convolution import (
     _is_integer_prefix,
     _is_kernel_size_prefix,
@@ -283,6 +310,85 @@ class ToolTests(unittest.TestCase):
             self.assertEqual(show_eigenfaces(model, 6).mode, "RGB")
         with self.assertRaises(ValueError):
             load_faces(Path(folder))  # gone, so there are no faces
+
+    def test_visual_words_are_the_closest_centres(self) -> None:
+        centroids = np.array([[0.0, 0.0], [10.0, 0.0], [0.0, 10.0]], dtype=np.float32)
+        descriptors = np.array([[1.0, 1.0], [9.0, 2.0], [2.0, 9.0], [8.0, 0.0]])
+        np.testing.assert_array_equal(assign_words(descriptors, centroids), [0, 1, 2, 1])
+        self.assertEqual(len(assign_words(np.empty((0, 2)), centroids)), 0)
+        np.testing.assert_allclose(word_histogram(np.array([0, 1, 1, 1]), 3), [0.25, 0.75, 0])
+        np.testing.assert_array_equal(word_histogram(np.empty(0, dtype=int), 3), [0, 0, 0])  # no keypoints
+
+    def test_histogram_kernels(self) -> None:
+        histograms = np.array([[0.5, 0.5, 0.0], [0.0, 0.5, 0.5], [0.5, 0.5, 0.0]])
+        distances = chi2_distances(histograms, histograms)
+        np.testing.assert_allclose(np.diag(distances), 0)
+        self.assertAlmostEqual(distances[0, 1], 0.25 / 0.5 + 0 + 0.25 / 0.5)  # empty bins in both count 0
+        np.testing.assert_allclose(distances, distances.T)
+        np.testing.assert_allclose(intersection_kernel(histograms, histograms)[0], [1.0, 0.5, 1.0])
+        self.assertAlmostEqual(resolved_gamma(CHI2, 0.0, histograms), 1 / distances.mean())  # auto
+        self.assertEqual(resolved_gamma(CHI2, 2.5, histograms), 2.5)
+        self.assertEqual(resolved_gamma(RBF, 0.0), "scale")
+
+    def test_bag_of_words_build_save_load_and_classify(self) -> None:
+        rng = np.random.default_rng(0)
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for label in ("blocks", "stripes"):
+                (root / label).mkdir()
+                for index in range(8):
+                    pixels = np.full((96, 96), 40, dtype=np.uint8)
+                    if label == "blocks":  # bright squares: ORB corners
+                        for row, col in rng.integers(8, 72, (6, 2)):
+                            pixels[row:row + 16, col:col + 16] = 220
+                    else:  # thin bars, ending inside the image so they have corners
+                        for row, col in rng.integers(8, 56, (5, 2)):
+                            pixels[row:row + 32, col:col + rng.integers(2, 6)] = 220
+                    Image.fromarray(pixels).save(root / label / f"{index}.png")
+            parameters = {"n_keypoints": 50, "fast_threshold": 0.05}
+            vocabulary, examples = build_vocabulary(root, "ORB", parameters, 4)
+            self.assertEqual(vocabulary.classes, ["blocks", "stripes"])
+            self.assertEqual((len(vocabulary.train), len(vocabulary.test)), (12, 4))  # 75/25 per class
+            self.assertFalse({path for path, _ in vocabulary.train} & {path for path, _ in vocabulary.test})
+            self.assertEqual(vocabulary.centroids.shape, (4, 256))
+            self.assertEqual(vocabulary.histograms.shape, (12, 4))
+            np.testing.assert_allclose(vocabulary.histograms.sum(axis=1), 1)
+            save_vocabulary(vocabulary, root)
+            loaded = load_vocabulary(root)
+            np.testing.assert_array_equal(loaded.centroids, vocabulary.centroids)
+            np.testing.assert_array_equal(loaded.histograms, vocabulary.histograms)
+            self.assertEqual((loaded.train, loaded.test), (vocabulary.train, vocabulary.test))
+            self.assertEqual(show_vocabulary(loaded, examples).mode, "RGB")
+
+            path, label = loaded.test[0]
+            with Image.open(root / path) as image_file:
+                image = image_file.convert("RGB")
+            row = describe(image, loaded)
+            self.assertEqual(show_histograms([row], loaded).mode, "RGB")
+            self.assertEqual(true_class(root / path, root, loaded), ("test", label))
+            self.assertIsNone(true_class(None, root, loaded))
+            settings = [(name, {}) for name in CLASSIFIERS] + [(SVM, {"kernel": kernel, "C": 10.0, "gamma": 0.0})
+                                                               for kernel in KERNELS]
+            settings += [(SVM, {"kernel": RBF, "C": 1.0, "gamma": 5.0}), (LOGISTIC, {"C": 0.1}),
+                         (FOREST, {"n_estimators": 20, "max_depth": 3})]
+            for name, parameters in settings:
+                prediction = classify(row.histogram, train_classifier(loaded, name, parameters))
+                self.assertIn(prediction.label, loaded.classes)
+                self.assertAlmostEqual(prediction.probabilities.sum(), 1.0)
+                self.assertEqual(prediction.probability, prediction.ranked()[0][1])
+            self.assertIn("(auto)", describe_parameters(SVM, {}, loaded))  # χ² with gamma left on auto
+            self.assertEqual(describe_parameters(FOREST, {"n_estimators": 20, "max_depth": 0}, loaded),
+                             "20 trees, max depth none")
+            classifier = train_classifier(loaded)
+            panel, summary, details = classification_result(image, row, loaded, classifier, ("test", label))
+            self.assertTrue(summary.startswith(f"p({details['Predicted']}) = "))
+            self.assertEqual(panel.mode, "RGB")
+            histogram_only, _, details = classification_result(image, row, loaded, None)
+            self.assertNotIn("Predicted", details)  # not classified until asked
+            with self.assertRaises(ValueError):  # a flat image has no keypoints, so no visual words
+                classify(describe(Image.new("L", (64, 64), 128), loaded).histogram, classifier)
+            with self.assertRaises(ValueError):
+                load_vocabulary(root / "blocks")  # no vocabulary saved there
 
     def test_person_detection_finds_the_template_in_a_flat_scene(self) -> None:
         template = Image.new("RGB", (16, 32), (60, 60, 60))
