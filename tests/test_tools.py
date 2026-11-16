@@ -1,4 +1,6 @@
+import json
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 
@@ -33,6 +35,15 @@ from forensics_app.tools.bow_classification import (
     resolved_gamma,
     train_classifier,
     true_class,
+)
+from forensics_app.tools.cnn_classification import (
+    CnnModel,
+    classification_details,
+    load_passport,
+    passport_path,
+    passport_text,
+    preprocess,
+    show_classification as show_cnn_classification,
 )
 from forensics_app.tools.convolution import (
     _is_integer_prefix,
@@ -524,6 +535,58 @@ class ToolTests(unittest.TestCase):
         full = keypoints.scaled(factor)
         self.assertEqual(full.points.tolist(), [[25.0, 50.0]])
         self.assertEqual((full.sizes.tolist(), full.orientations.tolist()), ([7.5], [1.0]))
+
+    def test_cnn_preprocessing_follows_the_passport(self) -> None:
+        image = Image.new("RGB", (64, 48), (255, 0, 51))
+        passport = {"classes": ["a"], "preprocessing": {"input_size": [8, 16], "scale": 1 / 255}}
+        batch = preprocess(image, passport)
+        self.assertEqual(batch.shape, (1, 8, 16, 3))  # NHWC, as Keras exports
+        np.testing.assert_allclose(batch[0, 0, 0], [1.0, 0.0, 0.2], atol=1e-6)
+        passport["preprocessing"].update(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], layout="NCHW")
+        batch = preprocess(image, passport)
+        self.assertEqual(batch.shape, (1, 3, 8, 16))
+        np.testing.assert_allclose(batch[0, :, 0, 0], [1.0, -1.0, -0.6], atol=1e-6)  # InceptionV3's [-1, 1]
+
+    def test_cnn_model_loads_with_its_passport_and_classifies(self) -> None:
+        # tests/data/tiny_cnn.onnx: conv 3x3 -> ReLU -> max pool -> dense -> softmax on 8x8 NHWC input, 3 classes
+        history = {"loss": [1.0, 0.5], "accuracy": [0.5, 0.8], "val_loss": [1.1, 0.7], "val_accuracy": [0.4, 0.7]}
+        passport = {
+            "name": "Tiny CNN",
+            "dataset": {"name": "Toy", "train": 10, "validation": 2, "test": 3},
+            "classes": ["cat", "dog", "ship"],
+            "preprocessing": {"input_size": [8, 8], "scale": 1 / 255, "steps": ["Resize to 8 x 8", "Divide by 255"]},
+            "training": {"optimizer": "Adam", "epochs": 2, "history": history},
+            "evaluation": {"test_accuracy": 0.7, "test_loss": 0.8},
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            model_file = Path(folder) / "tiny_cnn.onnx"
+            shutil.copyfile(Path(__file__).parent / "data" / "tiny_cnn.onnx", model_file)
+            with self.assertRaisesRegex(ValueError, "No passport"):
+                CnnModel.load(model_file)
+            passport_path(model_file).write_text(json.dumps({"classes": []}))
+            with self.assertRaisesRegex(ValueError, "not a model passport"):
+                load_passport(passport_path(model_file))
+            passport_path(model_file).write_text(json.dumps(passport))
+            model = CnnModel.load(model_file)
+            rng = np.random.default_rng(0)
+            image = Image.fromarray(rng.integers(0, 256, (40, 30, 3)).astype(np.uint8))
+            prediction = model.predict(image)
+            self.assertIn(prediction.label, passport["classes"])
+            self.assertAlmostEqual(prediction.probabilities.sum(), 1.0, places=5)
+            self.assertEqual(show_cnn_classification(image, prediction, model.passport).mode, "RGB")
+            text = passport_text(model.passport)
+            for expected in ("DATASET", "Training images: 10", "cat, dog, ship", "Step 1: Resize to 8 x 8",
+                             "Final validation accuracy: 0.700", "Test accuracy: 0.700"):
+                self.assertIn(expected, text)
+            details = classification_details(model, prediction)
+            self.assertEqual(details["Predicted"], prediction.label)
+            self.assertEqual(details["Dataset: Name"], "Toy")
+            passport["classes"] = ["cat", "dog"]
+            passport_path(model_file).write_text(json.dumps(passport))
+            with self.assertRaisesRegex(ValueError, "3 scores"):
+                CnnModel.load(model_file).predict(image)
+            with self.assertRaisesRegex(ValueError, "No model"):
+                CnnModel.load(Path(folder) / "missing.onnx")
 
     def test_registry_rejects_duplicate_ids(self) -> None:
         with self.assertRaises(ValueError):

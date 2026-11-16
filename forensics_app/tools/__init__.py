@@ -2,6 +2,7 @@
 
 from .bag_of_words import VisualVocabularyTool, WordHistogramTool
 from .bow_classification import ClassificationTool
+from .cnn_classification import CnnClassificationTool
 from .contrast_stretching import ContrastStretchingTool
 from .convolution import ConvolutionTool
 from .corner_detection import CornerDetectionTool
@@ -53,6 +54,7 @@ def build_tool_registry() -> ToolRegistry:
             VisualVocabularyTool(),
             WordHistogramTool(),
             ClassificationTool(),
+            CnnClassificationTool(),
         ]
     )
 
