@@ -11,6 +11,7 @@ from .edge_detection import EdgeDetectionTool
 from .eigenfaces import EigenfacesTool
 from .face_detection import FaceDetectionTool
 from .face_recognition import FaceRecognitionTool
+from .feature_projection import FeatureProjectionTool
 from .grayscale import GrayscaleTool
 from .histogram import HistogramTool
 from .hog import HogTool
@@ -55,6 +56,7 @@ def build_tool_registry() -> ToolRegistry:
             WordHistogramTool(),
             ClassificationTool(),
             CnnClassificationTool(),
+            FeatureProjectionTool(),
         ]
     )
 

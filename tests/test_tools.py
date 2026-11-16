@@ -55,6 +55,16 @@ from forensics_app.tools.convolution import (
 )
 from forensics_app.tools.corner_detection import VIEWS as CORNER_VIEWS, corner_response, find_corners, show_corners
 from forensics_app.tools.dialogs import preview_copy
+from forensics_app.tools.feature_projection import (
+    Features,
+    feature_tensor,
+    load_features,
+    project,
+    read_cifar_binary,
+    save_features,
+    show_projection,
+    stratified_sample,
+)
 from forensics_app.tools.eigenfaces import build_model, load_faces, load_model, save_model, show_eigenfaces
 from forensics_app.tools.face_detection import Face, draw_faces
 from forensics_app.tools.edge_detection import VIEWS, detect_edges, show_edges
@@ -587,6 +597,53 @@ class ToolTests(unittest.TestCase):
                 CnnModel.load(model_file).predict(image)
             with self.assertRaisesRegex(ValueError, "No model"):
                 CnnModel.load(Path(folder) / "missing.onnx")
+
+    def test_cifar_binary_test_batch_is_read_as_rgb_images(self) -> None:
+        import io
+        import tarfile
+
+        image = np.zeros((32, 32, 3), dtype=np.uint8)
+        image[0, 0] = (10, 20, 30)
+        records = b"".join(bytes([label]) + image.transpose(2, 0, 1).tobytes() for label in (3, 7))
+        with tempfile.TemporaryDirectory() as folder:
+            archive = Path(folder) / "cifar.tar.gz"
+            with tarfile.open(archive, "w:gz") as tar:
+                for name, data in (("test_batch.bin", records), ("batches.meta.txt", b"cat\ndog\n\n")):
+                    info = tarfile.TarInfo(f"cifar-10-batches-bin/{name}")
+                    info.size = len(data)
+                    tar.addfile(info, io.BytesIO(data))
+            test = read_cifar_binary(archive)
+        self.assertEqual(test.images.shape, (2, 32, 32, 3))
+        self.assertEqual(test.images[1, 0, 0].tolist(), [10, 20, 30])
+        self.assertEqual(test.labels.tolist(), [3, 7])
+        self.assertEqual(test.classes, ["cat", "dog"])
+
+    def test_feature_projection_samples_projects_and_draws(self) -> None:
+        rng = np.random.default_rng(0)
+        labels = np.repeat(np.arange(3), 40)
+        vectors = (rng.normal(size=(120, 16)) + labels[:, None] * 6).astype(np.float32)
+        features = Features(vectors, labels, labels[::-1].copy(), ["a", "b", "c"], "toy.onnx", "toy/Relu:0")
+        self.assertAlmostEqual(features.accuracy, 40 / 120)
+        sample = stratified_sample(labels, 30)
+        self.assertEqual(np.bincount(labels[sample]).tolist(), [10, 10, 10])
+        self.assertEqual(len(stratified_sample(labels, 500)), 120)
+        with tempfile.TemporaryDirectory() as folder:
+            loaded = load_features(save_features(features, Path(folder) / "toy.npz"))
+        np.testing.assert_array_equal(loaded.features, vectors)
+        self.assertEqual((loaded.classes, loaded.model, loaded.tensor), (features.classes, "toy.onnx", "toy/Relu:0"))
+        projection = project(features, 60, perplexity=10, neighbours=8)
+        self.assertEqual((projection.tsne.shape, projection.umap.shape), ((60, 2), (60, 2)))
+        for colour_by in ("True class", "Predicted class"):
+            self.assertEqual(show_projection(features, projection, colour_by).mode, "RGB")
+        with self.assertRaisesRegex(ValueError, "perplexity"):
+            project(features, 20, perplexity=30, neighbours=8)
+
+    def test_feature_tensor_needs_a_keras_relu_layer(self) -> None:
+        import cv2
+
+        net = cv2.dnn.readNetFromONNX(str(Path(__file__).parent / "data" / "tiny_cnn.onnx"))
+        with self.assertRaisesRegex(ValueError, "no ReLU layer"):
+            feature_tensor(net)
 
     def test_registry_rejects_duplicate_ids(self) -> None:
         with self.assertRaises(ValueError):
