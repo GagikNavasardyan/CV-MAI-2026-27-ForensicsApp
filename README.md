@@ -45,3 +45,11 @@ face detection/recognition, CNN classification and detection, transformers,
 semantic segmentation, and visualization/interpretability. Model weights and  
 datasets should not be committed to the starter repository; document where they  
 come from and keep paths configurable.
+
+## CNN classification (Set 8)
+
+1. Open [notebooks/set8_1_train_cnn.ipynb](notebooks/set8_1_train_cnn.ipynb) in Colab with a GPU runtime and run all  
+   cells. It trains the CNN and downloads `set8_models.zip`.
+2. Unzip it into `models/`. Each model has three files: `<name>.keras` (weights), `<name>.onnx` (what the app runs  
+   with OpenCV) and `<name>_passport.json` (dataset, class names, preprocessing, training history).
+3. In the app, open an image and choose **Deep learning → CNN classification**.
