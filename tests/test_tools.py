@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import shutil
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 import numpy as np
@@ -72,10 +73,40 @@ from forensics_app.tools.grayscale import GrayscaleTool
 from forensics_app.tools.histogram import histogram_image
 from forensics_app.tools.hog import VIEWS as HOG_VIEWS, extract_hog, show_hog
 from forensics_app.tools.keypoints import VIEWS as KEYPOINT_VIEWS, Keypoints, extract_keypoints, show_keypoints
+from forensics_app.tools.object_detection import (
+    VIEWS as DETECTION_VIEWS,
+    detections_from,
+    show_detections,
+    show_view,
+    summary,
+)
 from forensics_app.tools.person_detection import detect_person, show_detection
 from forensics_app.tools.registry import ToolRegistry
 from forensics_app.tools.split_channel import SplitChannelTool
 from forensics_app.tools.swap_channels import swap_channels
+
+
+class FakeTensor(np.ndarray):
+    """A NumPy array with torch's ``.cpu()``, enough to stand in for Ultralytics' box tensors."""
+
+    def cpu(self) -> np.ndarray:
+        return np.asarray(self)
+
+
+class FakeYoloResult:
+    """What the tools read from an Ultralytics ``Results``: the boxes, the class names and ``plot()`` (BGR)."""
+
+    def __init__(self) -> None:
+        self.names = {0: "person", 5: "bus"}
+        self.boxes = SimpleNamespace(xyxy=np.array([[10, 20, 50, 90], [0, 0, 100, 60]], float).view(FakeTensor),
+                                     conf=np.array([0.62, 0.94]).view(FakeTensor),
+                                     cls=np.array([0.0, 5.0]).view(FakeTensor))
+        self.speed = {"preprocess": 1.0, "inference": 20.0, "postprocess": 0.5}
+
+    def plot(self) -> np.ndarray:
+        pixels = np.zeros((60, 100, 3), np.uint8)
+        pixels[..., 0] = 255  # blue in BGR
+        return pixels
 
 
 class ToolTests(unittest.TestCase):
@@ -644,6 +675,27 @@ class ToolTests(unittest.TestCase):
         net = cv2.dnn.readNetFromONNX(str(Path(__file__).parent / "data" / "tiny_cnn.onnx"))
         with self.assertRaisesRegex(ValueError, "no ReLU layer"):
             feature_tensor(net)
+
+    def test_yolo_detections_are_read_from_the_result_most_confident_first(self) -> None:
+        detections = detections_from(FakeYoloResult())
+        self.assertEqual([(d.label, d.class_id) for d in detections], [("bus", 5), ("person", 0)])
+        self.assertEqual(detections[0].box, (0.0, 0.0, 100.0, 60.0))
+        self.assertAlmostEqual(detections[1].confidence, 0.62)
+        self.assertEqual(summary(detections), "1 × bus, 1 × person")
+        self.assertEqual(summary([]), "nothing")
+
+    def test_yolo_views(self) -> None:
+        image = Image.new("L", (100, 60), 200)
+        result = FakeYoloResult()
+        detections = detections_from(result)
+        drawn = show_detections(image, detections)
+        self.assertEqual(drawn.mode, "RGB")
+        self.assertGreater(drawn.width, drawn.height)  # keeps the image's landscape shape
+        self.assertEqual(show_view(image, result, detections, DETECTION_VIEWS[1]).getpixel((0, 0)), (0, 0, 255))
+        # Not converted, plot()'s BGR blue reads as red: the "why are the people blue?" swap.
+        self.assertEqual(show_view(image, result, detections, DETECTION_VIEWS[2]).getpixel((0, 0)), (255, 0, 0))
+        with self.assertRaises(ValueError):
+            show_view(image, result, detections, "Heat map")
 
     def test_registry_rejects_duplicate_ids(self) -> None:
         with self.assertRaises(ValueError):

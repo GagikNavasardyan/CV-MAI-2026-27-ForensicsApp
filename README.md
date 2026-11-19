@@ -53,3 +53,19 @@ come from and keep paths configurable.
 2. Unzip it into `models/`. Each model has three files: `<name>.keras` (weights), `<name>.onnx` (what the app runs  
    with OpenCV) and `<name>_passport.json` (dataset, class names, preprocessing, training history).
 3. In the app, open an image and choose **Deep learning → CNN classification**.
+
+## Object detection with YOLO (Set 9.1)
+
+1. Install the dependencies again (`python -m pip install -r requirements.txt`); this adds Ultralytics and PyTorch.
+2. In the app, open an image and choose **Deep learning → Object detection (YOLO)**. The first run downloads  
+   `yolo11n.pt` (YOLO11 nano, trained on the 80 COCO classes) into `models/`.
+3. Tune the two thresholds (**Reset to defaults** restores 0.25 and 0.7):
+   - **Confidence**: boxes whose best class score is lower are dropped. Higher means fewer but surer boxes.
+   - **NMS overlap (IoU)**: one object yields many near-identical boxes, so non-maximum suppression keeps the most  
+     confident one and drops boxes of the same class overlapping it by more than this IoU (overlap area / union  
+     area). Lower merges more, including close objects; higher leaves duplicates.
+4. Pick a view:
+   - **Detected objects**: boxes and "label confidence" tags drawn with matplotlib, one `tab20` colour per class.
+   - **Ultralytics plot()**: the library's own drawing, converted from BGR to RGB.
+   - **plot() without BGR → RGB**: the same array shown as it is. `plot()` returns OpenCV's BGR channel order,  
+     so read as RGB the red and blue channels swap: this is why the people on the slide are blue.
