@@ -20,6 +20,7 @@ from .image_info import ImageInfoTool
 from .image_lookup import ImageLookupTool
 from .keypoints import KeypointsTool
 from .masking import MaskingTool
+from .object_detection import ObjectDetectionTool
 from .person_detection import PersonDetectionTool
 from .registry import ToolRegistry
 from .sharpening import SharpeningTool
@@ -57,6 +58,7 @@ def build_tool_registry() -> ToolRegistry:
             ClassificationTool(),
             CnnClassificationTool(),
             FeatureProjectionTool(),
+            ObjectDetectionTool(),
         ]
     )
 
