@@ -76,6 +76,8 @@ from forensics_app.tools.keypoints import VIEWS as KEYPOINT_VIEWS, Keypoints, ex
 from forensics_app.tools.object_detection import (
     VIEWS as DETECTION_VIEWS,
     detections_from,
+    label_path_for,
+    read_ground_truth,
     show_detections,
     show_view,
     summary,
@@ -696,6 +698,23 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(show_view(image, result, detections, DETECTION_VIEWS[2]).getpixel((0, 0)), (255, 0, 0))
         with self.assertRaises(ValueError):
             show_view(image, result, detections, "Heat map")
+
+    def test_yolo_ground_truth_is_read_from_the_label_file(self) -> None:
+        self.assertEqual(label_path_for(Path("data", "test", "images", "cell.jpg")),
+                         Path("data", "test", "labels", "cell.txt"))
+        with tempfile.TemporaryDirectory() as folder:
+            labels = Path(folder) / "cell.txt"
+            labels.write_text("1 0.5 0.5 0.2 0.5\n2 0.1 0.2 0.2 0.4\n")
+            truth = read_ground_truth(labels, (100, 60), {0: "PC", 1: "RBC", 2: "WBC"})
+        self.assertEqual([(box.label, box.box) for box in truth],
+                         [("RBC", (40.0, 15.0, 60.0, 45.0)), ("WBC", (0.0, 0.0, 20.0, 24.0))])
+        self.assertIsNone(read_ground_truth(Path(folder) / "missing.txt", (100, 60), {}))
+        image = Image.new("L", (100, 60), 200)
+        result = FakeYoloResult()
+        compared = show_view(image, result, detections_from(result), DETECTION_VIEWS[3], truth)
+        self.assertEqual(compared.mode, "RGB")
+        with self.assertRaisesRegex(ValueError, "no YOLO label file"):
+            show_view(image, result, detections_from(result), DETECTION_VIEWS[3], None)
 
     def test_registry_rejects_duplicate_ids(self) -> None:
         with self.assertRaises(ValueError):
