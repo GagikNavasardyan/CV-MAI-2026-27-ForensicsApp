@@ -27,6 +27,7 @@ from .sharpening import SharpeningTool
 from .split_channel import SplitChannelTool
 from .swap_channels import SwapChannelsTool
 from .template_matching import TemplateMatchingTool
+from .unet_segmentation import UnetSegmentationTool
 
 
 def build_tool_registry() -> ToolRegistry:
@@ -59,6 +60,7 @@ def build_tool_registry() -> ToolRegistry:
             CnnClassificationTool(),
             FeatureProjectionTool(),
             ObjectDetectionTool(),
+            UnetSegmentationTool(),
         ]
     )
 
