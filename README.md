@@ -69,3 +69,17 @@ come from and keep paths configurable.
    - **Ultralytics plot()**: the library's own drawing, converted from BGR to RGB.
    - **plot() without BGR → RGB**: the same array shown as it is. `plot()` returns OpenCV's BGR channel order,  
      so read as RGB the red and blue channels swap: this is why the people on the slide are blue.
+
+## U-Net segmentation (Set 11.1)
+
+1. Unzip `TrayDataset.zip` (Set 10-11 materials) into `datasets/`, so the folders are `datasets/TrayDataset/XTrain`,  
+   `yTrain`, `XTest` and `yTest`.
+2. Install the ONNX exporter in the `.venv` (only the notebook needs it):  
+   `uv pip install --python .venv/Scripts/python.exe onnx onnxscript`
+3. Run [notebooks/set11_1_train_unet.ipynb](notebooks/set11_1_train_unet.ipynb) with the `.venv` kernel (about a minute  
+   on a laptop GPU). It trains a small U-Net on a binary task, food vs. not food (mask classes from 5 on are food),  
+   and saves `tray_food_unet.pt`, `tray_food_unet.onnx` and `tray_food_unet_passport.json` in `models/`.
+4. In the app, open a tray image and choose **Deep learning → U-Net segmentation**. It shows the original image, the  
+   segmentation mask and the mask overlaid on the image; on a dataset image (`XTest/<name>.jpg`) it also reads the  
+   mask (`yTest/<name>.png`) and shows the ground truth and the Dice coefficient. The **Threshold** sets the food  
+   probability above which a pixel is food.

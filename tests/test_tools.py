@@ -86,6 +86,12 @@ from forensics_app.tools.person_detection import detect_person, show_detection
 from forensics_app.tools.registry import ToolRegistry
 from forensics_app.tools.split_channel import SplitChannelTool
 from forensics_app.tools.swap_channels import swap_channels
+from forensics_app.tools.unet_segmentation import (
+    dice,
+    mask_path_for,
+    read_ground_truth as read_food_mask,
+    show_segmentation,
+)
 
 
 class FakeTensor(np.ndarray):
@@ -715,6 +721,23 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(compared.mode, "RGB")
         with self.assertRaisesRegex(ValueError, "no YOLO label file"):
             show_view(image, result, detections_from(result), DETECTION_VIEWS[3], None)
+
+    def test_unet_ground_truth_and_dice(self) -> None:
+        self.assertEqual(mask_path_for(Path("TrayDataset", "XTest", "1005a.jpg")),
+                         Path("TrayDataset", "yTest", "1005a.png"))
+        self.assertIsNone(mask_path_for(Path("img", "coffee.png")))
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "mask.png"
+            Image.fromarray(np.array([[0, 1, 5], [42, 4, 6]], dtype=np.uint8)).save(path)
+            truth = read_food_mask(path, (3, 2))
+        self.assertEqual(truth.tolist(), [[False, False, True], [True, False, True]])
+        self.assertIsNone(read_food_mask(Path(folder) / "missing.png", (3, 2)))
+        prediction = np.array([[False, True, True], [True, False, False]])
+        self.assertAlmostEqual(dice(prediction, truth), 2 * 2 / (3 + 3))
+        self.assertEqual(dice(np.zeros((2, 2), bool), np.zeros((2, 2), bool)), 1.0)
+        image = Image.new("RGB", (3, 2))
+        self.assertEqual(show_segmentation(image, prediction, truth).mode, "RGB")
+        self.assertEqual(show_segmentation(image, prediction).mode, "RGB")
 
     def test_registry_rejects_duplicate_ids(self) -> None:
         with self.assertRaises(ValueError):
