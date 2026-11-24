@@ -2,6 +2,7 @@
 
 from .bag_of_words import VisualVocabularyTool, WordHistogramTool
 from .bow_classification import ClassificationTool
+from .clip_zero_shot import ClipZeroShotTool
 from .cnn_classification import CnnClassificationTool
 from .contrast_stretching import ContrastStretchingTool
 from .convolution import ConvolutionTool
@@ -61,6 +62,7 @@ def build_tool_registry() -> ToolRegistry:
             FeatureProjectionTool(),
             ObjectDetectionTool(),
             UnetSegmentationTool(),
+            ClipZeroShotTool(),
         ]
     )
 
