@@ -83,3 +83,13 @@ come from and keep paths configurable.
    segmentation mask and the mask overlaid on the image; on a dataset image (`XTest/<name>.jpg`) it also reads the  
    mask (`yTest/<name>.png`) and shows the ground truth and the Dice coefficient. The **Threshold** sets the food  
    probability above which a pixel is food.
+
+## CLIP zero-shot classification (Set 10.1)
+
+1. Install the dependencies again (`python -m pip install -r requirements.txt`); this adds Hugging Face Transformers.
+2. In the app, open an image and choose **Deep learning → CLIP zero-shot classification**. The first run downloads  
+   the model into the Hugging Face cache (about 600 MB for ViT-B/32, 1.7 GB for ViT-L/14).
+3. Write the classes, one per line (any number, any text), and the template: `{}` is replaced by each class, so  
+   `a photo of a {}.` turns `cat` into `a photo of a cat.`. CLIP encodes the image and every sentence, and the  
+   softmax of their scaled cosine similarities gives the probabilities. Nothing is trained: change the text and the  
+   classifier changes. The probabilities always sum to 1, so add an "other"-style class when none may fit.

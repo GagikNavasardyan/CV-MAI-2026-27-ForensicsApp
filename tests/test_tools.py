@@ -26,6 +26,7 @@ from forensics_app.tools.bow_classification import (
     FOREST,
     KERNELS,
     LOGISTIC,
+    Prediction,
     RBF,
     SVM,
     chi2_distances,
@@ -37,6 +38,7 @@ from forensics_app.tools.bow_classification import (
     train_classifier,
     true_class,
 )
+from forensics_app.tools.clip_zero_shot import prompts, read_classes, show_zero_shot
 from forensics_app.tools.cnn_classification import (
     CnnModel,
     classification_details,
@@ -738,6 +740,18 @@ class ToolTests(unittest.TestCase):
         image = Image.new("RGB", (3, 2))
         self.assertEqual(show_segmentation(image, prediction, truth).mode, "RGB")
         self.assertEqual(show_segmentation(image, prediction).mode, "RGB")
+
+    def test_clip_classes_are_written_into_the_template(self) -> None:
+        classes = read_classes("  two cats\n\nthree cats \n")
+        self.assertEqual(classes, ["two cats", "three cats"])
+        self.assertEqual(prompts(classes, "a photo of {}."), ["a photo of two cats.", "a photo of three cats."])
+        for text in ("cat", "cat\ncat"):
+            with self.assertRaises(ValueError):
+                read_classes(text)
+        with self.assertRaisesRegex(ValueError, "needs"):
+            prompts(classes, "a photo")
+        prediction = Prediction(classes, np.array([0.76, 0.24]))
+        self.assertEqual(show_zero_shot(Image.new("L", (40, 30), 128), prediction, "a photo of {}.").mode, "RGB")
 
     def test_registry_rejects_duplicate_ids(self) -> None:
         with self.assertRaises(ValueError):
